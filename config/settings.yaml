@@ -1,0 +1,16 @@
+api:
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  api_key: "${DASHSCOPE_API_KEY}"  # 从环境变量读取
+  model: "qwen3.5-plus"
+  temperature: 0.1
+  max_output_tokens: 65536
+  enable_thinking: false
+  retry: 3
+  timeout: 120
+
+output:
+  dir: "output"
+
+logging:
+  console_level: "INFO"
+  file_level: "DEBUG"

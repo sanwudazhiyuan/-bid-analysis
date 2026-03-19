@@ -1,0 +1,26 @@
+styles:
+  heading1:
+    font: "微软雅黑"
+    size: 16
+    bold: true
+    color: "#1a5276"
+  heading2:
+    font: "微软雅黑"
+    size: 14
+    bold: true
+    color: "#2471a3"
+  heading3:
+    font: "微软雅黑"
+    size: 12
+    bold: true
+  body:
+    font: "宋体"
+    size: 10.5
+  table_header:
+    font: "微软雅黑"
+    size: 10
+    bold: true
+    bg_color: "#f2f3f4"
+  table_body:
+    font: "宋体"
+    size: 10
