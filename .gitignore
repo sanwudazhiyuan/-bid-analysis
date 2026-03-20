@@ -5,3 +5,4 @@ output/
 .claude/
 *.egg-info/
 .pytest_cache/
+config/settings.local.yaml
