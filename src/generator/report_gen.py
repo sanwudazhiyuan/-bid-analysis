@@ -3,6 +3,7 @@
 输出包含 A-G 模块标题、编号子标题和表格。
 不包含 bid_format 和 checklist 模块（它们有独立生成器）。
 子标题下只输出表格，text 类型内容也转为表格渲染。
+每个表格末尾添加"确认"勾选列。
 """
 
 import os
@@ -22,6 +23,21 @@ def _extract_module_letter(title: str) -> str:
     """从模块标题中提取字母前缀，如 'A. 项目概况' → 'A'"""
     m = re.match(r"([A-G])\.", title)
     return m.group(1) if m else ""
+
+
+def _add_checkbox_column(section: dict) -> dict:
+    """为 section 添加"确认"勾选列，返回新 dict。"""
+    section = dict(section)
+    columns = list(section.get("columns", []))
+    rows = [list(row) for row in section.get("rows", [])]
+
+    columns.append("确认")
+    for row in rows:
+        row.append("☐")
+
+    section["columns"] = columns
+    section["rows"] = rows
+    return section
 
 
 def render_report(data: dict, output_path: str) -> None:
@@ -107,13 +123,14 @@ def _render_sections(
             sub_run = sub_para.add_run(numbered_title)
             style_mgr.apply_run_style(sub_run, "heading3")
 
-        # 渲染内容 — 只允许表格
+        # 渲染内容 — 只允许表格，并添加勾选列
         if section_type in ("key_value_table", "standard_table"):
-            # 去掉 title 避免 table_builder 重复渲染标题
+            # 去掉 title 避免 table_builder 重复渲染标题，添加勾选列
             section_no_title = {k: v for k, v in section.items() if k != "title"}
-            table_builder.build(section_no_title, doc)
+            section_with_check = _add_checkbox_column(section_no_title)
+            table_builder.build(section_with_check, doc)
         elif section_type in ("text", "template"):
-            # text/template 内容转为单列表格
+            # text/template 内容转为单列表格，添加勾选列
             content = section.get("content", "")
             if content:
                 _render_text_as_table(doc, section_title, content, table_builder, style_mgr)
@@ -131,10 +148,11 @@ def _render_text_as_table(
     table_builder: TableBuilder,
     style_mgr: StyleManager,
 ) -> None:
-    """将文本内容转为表格渲染（单列表格：标题+内容）。"""
+    """将文本内容转为表格渲染（单列表格：标题+内容+勾选列）。"""
     section_as_table = {
         "type": "key_value_table",
         "columns": ["条款", "内容"],
         "rows": [[title or "详情", content]],
     }
-    table_builder.build(section_as_table, doc)
+    section_with_check = _add_checkbox_column(section_as_table)
+    table_builder.build(section_with_check, doc)

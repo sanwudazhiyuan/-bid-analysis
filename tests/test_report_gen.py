@@ -97,6 +97,18 @@ def test_render_report_basic(tmp_path, basic_data):
     assert len(doc.tables) >= 1
 
 
+def test_render_report_tables_have_checkbox_column(tmp_path, basic_data):
+    """报告中的表格应包含勾选列"""
+    out = str(tmp_path / "report.docx")
+    render_report(basic_data, out)
+
+    doc = Document(out)
+    table = doc.tables[0]
+    # 最后一列应是勾选列
+    last_col_header = table.rows[0].cells[-1].text
+    assert "确认" in last_col_header or "✓" in last_col_header or "完成" in last_col_header
+
+
 def test_render_report_multi_module(tmp_path, multi_module_data):
     """多模块报告：所有模块标题和表格均存在"""
     out = str(tmp_path / "report.docx")
