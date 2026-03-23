@@ -154,20 +154,26 @@ alembic>=1.13.0
 celery[redis]>=5.3.0
 redis>=5.0.0
 python-jose[cryptography]>=3.3.0
-passlib[bcrypt]>=1.7.4
+bcrypt>=4.0.0
 python-multipart>=0.0.6
 httpx>=0.26.0
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
 ```
+
+> **⚠️ 实施偏差:** `passlib[bcrypt]` 已替换为 `bcrypt>=4.0.0`。passlib 已停止维护且与 bcrypt>=5.0 不兼容（内部 wrap-bug 检测使用 >72 字节测试字符串触发 ValueError）。改为直接使用 bcrypt 库 + SHA-256 prehash 处理超长密码。
 
 - [ ] **Step 2: 创建 config.py — 环境变量配置**
 
 ```python
 # server/app/config.py
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env")
+
     DATABASE_URL: str = "postgresql+asyncpg://biduser:password@localhost:5432/bid_analyzer"
     REDIS_URL: str = "redis://localhost:6379/0"
     JWT_SECRET: str = "dev-secret-change-in-production"
@@ -178,11 +184,10 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE: int = 50 * 1024 * 1024  # 50MB
     ALLOWED_EXTENSIONS: list[str] = [".doc", ".docx", ".pdf"]
 
-    class Config:
-        env_file = ".env"
-
 settings = Settings()
 ```
+
+> **⚠️ 实施偏差:** 使用 `model_config = SettingsConfigDict(...)` 替代已废弃的 `class Config`，避免 Pydantic V2 deprecation warning。
 
 - [ ] **Step 3: 创建 `server/app/__init__.py`** (空文件)
 
@@ -497,18 +502,22 @@ Expected: FAIL (security module not found)
 
 ```python
 # server/app/security.py
+import hashlib
 from datetime import datetime, timedelta, timezone
+
+import bcrypt
 from jose import jwt, JWTError
-from passlib.context import CryptContext
 from server.app.config import settings
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+def _prehash(password: str) -> bytes:
+    """Pre-hash with SHA-256 to handle passwords > 72 bytes (bcrypt limit)."""
+    return hashlib.sha256(password.encode("utf-8")).hexdigest().encode("utf-8")
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(_prehash(password), bcrypt.gensalt()).decode("utf-8")
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    return bcrypt.checkpw(_prehash(plain), hashed.encode("utf-8"))
 
 def create_access_token(data: dict) -> str:
     to_encode = data.copy()
@@ -525,9 +534,11 @@ def create_refresh_token(data: dict) -> str:
 def decode_token(token: str) -> dict | None:
     try:
         return jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
-    except JWTError:
+    except (JWTError, Exception):
         return None
 ```
+
+> **⚠️ 实施偏差:** 直接使用 `bcrypt` 库替代 `passlib`。通过 SHA-256 prehash 将任意长度密码映射为 64 字节 hex 字符串，绕过 bcrypt 72 字节截断限制。`decode_token` 的异常捕获扩展为 `(JWTError, Exception)` 以处理 None 输入等边界情况。
 
 - [ ] **Step 4: 运行测试验证通过**
 
@@ -571,13 +582,12 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 class UserInfo(BaseModel):
+    model_config = {"from_attributes": True}
+
     id: int
     username: str
     display_name: str | None
     role: str
-
-    class Config:
-        from_attributes = True
 ```
 
 - [ ] **Step 2: 创建依赖注入 deps.py**
@@ -722,20 +732,31 @@ async def health():
 ```python
 # server/tests/conftest.py
 import asyncio
-import os
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.compiler import compiles
 
 from server.app.database import Base, get_db
 from server.app.main import app
 from server.app.security import hash_password
 from server.app.models import User, Task, Annotation, GeneratedFile  # noqa: F401
 
-# 使用 PostgreSQL 测试数据库（与主 DB 相同引擎，避免 UUID/JSONB 不兼容）
-# CI 中通过 docker-compose 启动测试 PG；本地开发可用同一 PG 实例的不同数据库
-TEST_DB_URL = os.getenv("TEST_DATABASE_URL", "postgresql+asyncpg://biduser:devpassword@localhost:5432/bid_analyzer_test")
+# 使用 SQLite + aiosqlite 进行测试，无需运行 PostgreSQL
+# 通过 type compiler 让 PG 专有类型 (UUID, JSONB) 在 SQLite 上工作
+TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
+
+def _register_sqlite_compilers(engine):
+    @compiles(PG_UUID, "sqlite")
+    def compile_uuid(element, compiler, **kw):
+        return "VARCHAR(36)"
+
+    @compiles(JSONB, "sqlite")
+    def compile_jsonb(element, compiler, **kw):
+        return "JSON"
 
 @pytest.fixture(scope="session")
 def event_loop():
@@ -744,17 +765,29 @@ def event_loop():
     loop.close()
 
 @pytest_asyncio.fixture
-async def db_session():
+async def db_engine():
     engine = create_async_engine(TEST_DB_URL, echo=False)
+    _register_sqlite_compilers(engine)
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with session_factory() as session:
-        yield session
+    yield engine
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
     await engine.dispose()
+
+@pytest_asyncio.fixture
+async def db_session(db_engine):
+    session_factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+    async with session_factory() as session:
+        yield session
+        await session.rollback()
 
 @pytest_asyncio.fixture
 async def client(db_session):
@@ -768,7 +801,7 @@ async def client(db_session):
 
 @pytest_asyncio.fixture
 async def test_user(db_session):
-    user = User(username="testuser", password_hash=hash_password("testpass"), display_name="Test", role="user")
+    user = User(username="testuser", password_hash=hash_password("testpass"), display_name="Test User", role="user")
     db_session.add(user)
     await db_session.commit()
     await db_session.refresh(user)
@@ -781,13 +814,21 @@ async def admin_user(db_session):
     await db_session.commit()
     await db_session.refresh(user)
     return user
+
+@pytest_asyncio.fixture
+async def auth_headers(client, test_user):
+    resp = await client.post("/api/auth/login", json={"username": "testuser", "password": "testpass"})
+    token = resp.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+@pytest_asyncio.fixture
+async def admin_headers(client, admin_user):
+    resp = await client.post("/api/auth/login", json={"username": "admin", "password": "adminpass"})
+    token = resp.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
 ```
 
-注意：在 `server/requirements.txt` 追加 `pytest-asyncio>=0.23.0`。
-测试需要本地运行 PostgreSQL（docker-compose 中的 postgres 容器即可）。首次运行前需创建测试数据库：
-```bash
-docker-compose exec postgres createdb -U biduser bid_analyzer_test
-```
+> **⚠️ 实施偏差:** 测试改用 SQLite + aiosqlite（内存数据库），无需运行 PostgreSQL 即可执行全部测试。通过 `@compiles` 注册 PG_UUID → VARCHAR(36) 和 JSONB → JSON 的 SQLite 类型编译器，解决 PG 专有类型兼容问题。新增 `auth_headers` / `admin_headers` 便利 fixtures。
 
 - [ ] **Step 8: 编写 auth API 测试**
 
@@ -1184,6 +1225,8 @@ EXPOSE 80
 
 ```yaml
 # docker-compose.yml (项目根目录)
+name: bid-analyzer  # 必须显式指定，否则中文目录名导致 project name 为空
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -1378,6 +1421,8 @@ import uuid
 from pydantic import BaseModel
 
 class TaskResponse(BaseModel):
+    model_config = {"from_attributes": True}
+
     id: uuid.UUID
     filename: str
     file_size: int | None
@@ -1388,9 +1433,6 @@ class TaskResponse(BaseModel):
     created_at: datetime.datetime
     started_at: datetime.datetime | None
     completed_at: datetime.datetime | None
-
-    class Config:
-        from_attributes = True
 
 class TaskListResponse(BaseModel):
     items: list[TaskResponse]
@@ -2953,6 +2995,8 @@ class AnnotationCreate(BaseModel):
     content: str
 
 class AnnotationResponse(BaseModel):
+    model_config = {"from_attributes": True}
+
     id: int
     task_id: str
     user_id: int
@@ -2964,9 +3008,6 @@ class AnnotationResponse(BaseModel):
     status: str
     llm_response: str | None
     created_at: datetime.datetime
-
-    class Config:
-        from_attributes = True
 
 class AnnotationUpdate(BaseModel):
     content: str
