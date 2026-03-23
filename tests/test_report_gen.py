@@ -205,3 +205,132 @@ def test_render_report_creates_parent_dirs(tmp_path):
     }
     render_report(data, out)
     assert os.path.exists(out)
+
+
+def test_render_report_excludes_bid_format_and_checklist(tmp_path):
+    """分析报告不应包含 bid_format 和 checklist 模块"""
+    data = {
+        "schema_version": "1.0",
+        "modules": {
+            "module_a": {
+                "title": "A. 项目概况",
+                "sections": [
+                    {
+                        "id": "A1",
+                        "title": "基本信息",
+                        "type": "key_value_table",
+                        "columns": ["项目", "内容"],
+                        "rows": [["项目名称", "测试"]],
+                    }
+                ],
+            },
+            "bid_format": {
+                "title": "投标文件格式",
+                "sections": [
+                    {
+                        "id": "BF1",
+                        "title": "投标函",
+                        "type": "template",
+                        "content": "这段内容不应出现在分析报告中",
+                    }
+                ],
+            },
+            "checklist": {
+                "title": "资料清单",
+                "sections": [
+                    {
+                        "id": "CL1",
+                        "title": "资格材料",
+                        "type": "standard_table",
+                        "columns": ["序号", "材料"],
+                        "rows": [["1", "营业执照"]],
+                    }
+                ],
+            },
+        },
+    }
+    out = str(tmp_path / "report.docx")
+    render_report(data, out)
+
+    doc = Document(out)
+    full_text = "\n".join(p.text for p in doc.paragraphs)
+    assert "A. 项目概况" in full_text
+    assert "投标文件格式" not in full_text
+    assert "投标函" not in full_text
+    assert "资料清单" not in full_text
+
+
+def test_render_report_section_numbering(tmp_path):
+    """子标题应使用编号格式如 A.1, A.2"""
+    data = {
+        "schema_version": "1.0",
+        "modules": {
+            "module_a": {
+                "title": "A. 项目概况",
+                "sections": [
+                    {
+                        "id": "A1",
+                        "title": "基本信息",
+                        "type": "key_value_table",
+                        "columns": ["项目", "内容"],
+                        "rows": [["项目名称", "测试"]],
+                    },
+                    {
+                        "id": "A2",
+                        "title": "采购信息",
+                        "type": "key_value_table",
+                        "columns": ["项目", "内容"],
+                        "rows": [["预算", "100万"]],
+                    },
+                ],
+            },
+        },
+    }
+    out = str(tmp_path / "report.docx")
+    render_report(data, out)
+
+    doc = Document(out)
+    full_text = "\n".join(p.text for p in doc.paragraphs)
+    assert "A.1" in full_text
+    assert "A.2" in full_text
+
+
+def test_render_report_text_sections_converted_to_table(tmp_path):
+    """text 类型的 section 应转为单列表格而非文字段落"""
+    data = {
+        "schema_version": "1.0",
+        "modules": {
+            "module_d": {
+                "title": "D. 合同条款",
+                "sections": [
+                    {
+                        "id": "D1",
+                        "title": "知识产权",
+                        "type": "text",
+                        "content": "甲方拥有银行卡的设计权和知识产权。",
+                    },
+                    {
+                        "id": "D2",
+                        "title": "保密条款",
+                        "type": "text",
+                        "content": "甲乙双方均负有保密义务。",
+                    },
+                ],
+            },
+        },
+    }
+    out = str(tmp_path / "report.docx")
+    render_report(data, out)
+
+    doc = Document(out)
+    # text 内容应在表格中，不应作为独立段落
+    all_para_text = "\n".join(p.text for p in doc.paragraphs)
+    assert "甲方拥有银行卡" not in all_para_text
+    assert "甲乙双方" not in all_para_text
+    # 应有表格包含这些内容
+    assert len(doc.tables) >= 2
+    all_table_text = " ".join(
+        cell.text for t in doc.tables for row in t.rows for cell in row.cells
+    )
+    assert "甲方拥有银行卡" in all_table_text
+    assert "甲乙双方" in all_table_text
