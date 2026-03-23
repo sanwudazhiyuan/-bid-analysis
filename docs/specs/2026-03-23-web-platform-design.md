@@ -137,14 +137,17 @@ CREATE TABLE tasks (
     file_size     BIGINT,
     status        VARCHAR(20) DEFAULT 'pending', -- pending|parsing|indexing|extracting|generating|completed|failed
     current_step  VARCHAR(100),                  -- 当前步骤描述（如"提取 D.合同条款 [4/9]"）
-    progress      INTEGER DEFAULT 0,             -- 0-100 进度百分比
+    progress      INTEGER DEFAULT 0,             -- 0-100 进度百分比（仅在任务完成/失败时同步到DB，运行期间以Redis为准）
     error_message TEXT,
+    celery_task_id VARCHAR(255),                 -- Celery AsyncResult ID，用于 SSE 进度查询
     -- 管线结果引用
     parsed_path   VARCHAR(1000),
     indexed_path  VARCHAR(1000),
     extracted_path VARCHAR(1000),
     -- 提取结果直接存 JSONB（方便前端查询和标注）
     extracted_data JSONB,
+    -- 勾选状态：{module_key: {section_id: {row_index: true/false}}}
+    checkbox_data  JSONB DEFAULT '{}',
     -- 时间戳
     created_at    TIMESTAMP DEFAULT NOW(),
     started_at    TIMESTAMP,
@@ -161,8 +164,9 @@ CREATE TABLE annotations (
     row_index     INTEGER,                  -- 表格行号（NULL 表示 section 级标注）
     annotation_type VARCHAR(20) NOT NULL,   -- 'comment' | 'correction' | 'flag'
     content       TEXT NOT NULL,            -- 标注内容/修改意见
-    status        VARCHAR(20) DEFAULT 'pending', -- pending | submitted | resolved
+    status        VARCHAR(20) DEFAULT 'pending', -- pending | submitted | resolved | failed
     llm_response  TEXT,                     -- LLM 重新提取的结果
+    reextract_celery_id VARCHAR(255),       -- 重提取 Celery 任务 ID（用于独立 SSE 查询）
     created_at    TIMESTAMP DEFAULT NOW(),
     resolved_at   TIMESTAMP
 );
@@ -201,7 +205,9 @@ CREATE INDEX idx_annotations_module_section ON annotations(module_key, section_i
 | POST | `/api/auth/logout` | 登出 |
 | GET  | `/api/auth/me` | 获取当前用户信息 |
 
-认证方式：JWT Bearer Token，access_token 有效期 24h。
+认证方式：JWT Bearer Token（Authorization header），access_token 有效期 24h，refresh_token 有效期 7 天。refresh_token 用于无感续期，前端在 access_token 过期前自动调用刷新。
+
+| POST | `/api/auth/refresh` | 刷新 access_token（需提供有效 refresh_token） |
 
 ### 5.2 任务管理
 
@@ -221,8 +227,10 @@ CREATE INDEX idx_annotations_module_section ON annotations(module_key, section_i
 | PUT  | `/api/tasks/{id}/preview/checkbox` | 更新勾选状态 |
 | POST | `/api/tasks/{id}/annotations` | 创建标注（行级/section级） |
 | GET  | `/api/tasks/{id}/annotations` | 获取所有标注 |
+| PUT  | `/api/tasks/{id}/annotations/{ann_id}` | 修改标注内容 |
 | DELETE | `/api/tasks/{id}/annotations/{ann_id}` | 删除标注 |
-| POST | `/api/tasks/{id}/reextract` | 提交标注后触发 LLM 重新提取 |
+| POST | `/api/tasks/{id}/reextract` | 提交标注后触发 LLM 重新提取，返回 `{celery_task_id}` |
+| GET  | `/api/tasks/{id}/reextract/{celery_task_id}/progress` | **SSE 端点**：重提取任务进度 |
 
 ### 5.4 文件下载
 
@@ -276,6 +284,10 @@ def run_pipeline(self, task_id: str):
             "modules_total": 9,
         })
         # 调用单个模块提取...
+
+    # 注意：跳过 Layer 4（CLI 人工校验）
+    # Web 版由用户通过交互式预览页完成校验（标注+LLM重提取），
+    # 因此管线直接从提取跳到生成。用户在预览页确认后，可触发 regenerate 重新生成。
 
     # Layer 5: 生成 (90-100%)
     self.update_state(state="PROGRESS", meta={
@@ -586,8 +598,9 @@ server/                          # 新增 Web 服务目录
 │   │   └── reextract_task.py    — 标注重提取任务
 │   ├── deps.py                  — FastAPI 依赖注入（get_db, get_current_user）
 │   └── security.py              — JWT + 密码哈希
+├── alembic.ini                  — Alembic 配置（标准位置：server/ 根目录）
 ├── alembic/                     — 数据库迁移
-│   ├── alembic.ini
+│   ├── env.py
 │   └── versions/
 ├── requirements.txt             — Web 服务额外依赖
 ├── Dockerfile                   — API + Worker 镜像
@@ -645,8 +658,6 @@ web/                              # 前端项目目录
 ### 11.1 docker-compose.yml
 
 ```yaml
-version: "3.8"
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -707,6 +718,10 @@ services:
       - "80:80"
     depends_on:
       - api
+    # Nginx 配置需要：
+    # - proxy_pass http://api:8000 用于 /api/*
+    # - SSE 端点需 proxy_buffering off; proxy_cache off; proxy_read_timeout 600s;
+    # - 静态文件由 nginx 容器直接服务
 
 volumes:
   pgdata:
@@ -740,16 +755,38 @@ docker-compose exec api python -m server.app.scripts.create_admin
 
 | 文件 | 改动 | 原因 |
 |------|------|------|
-| `src/extractor/extractor.py` | 添加 `extract_single_module()` 函数 | 支持单模块重提取 |
+| `src/extractor/extractor.py` | 添加 `extract_single_module(module_key, paragraphs, index_result)` 包装函数 | CLI 的 `cmd_extract` 已能按模块提取（通过 `_MODULE_REGISTRY`），此函数是干净的 API 包装，供 Celery Worker 和重提取任务调用 |
 | `src/extractor/base.py` | 添加 `reextract_with_annotations()` | 支持带标注上下文的重提取 |
 | `src/logger.py` | 添加回调支持 | 允许 Celery Worker 捕获日志进度 |
+
+**`reextract_with_annotations()` 函数契约：**
+
+```python
+def reextract_with_annotations(
+    module_key: str,           # 如 "module_d"
+    section_id: str,           # 如 "D3"
+    original_section: dict,    # 当前 extracted_data 中该 section 的 JSON
+    relevant_paragraphs: list, # 从 indexed.json 中筛选的相关原文段落
+    annotations: list[dict],   # [{row_index: int, content: str, annotation_type: str}, ...]
+) -> dict:
+    """带用户标注的 LLM 重提取。
+
+    1. 将 original_section + annotations 注入 prompt 模板（见 7.5）
+    2. 连同 relevant_paragraphs 调用 LLM API
+    3. 返回新的 section JSON（与原始结构相同）
+    4. 调用方负责将结果合并回 task.extracted_data JSONB
+
+    异常处理：LLM 调用失败时抛出 ExtractError，
+    调用方捕获后将 annotation.status 设为 'failed'。
+    """
+```
 
 ### 12.2 不修改的部分
 
 - `src/parser/` — 原样使用
 - `src/indexer/` — 原样使用
 - `src/generator/` — 原样使用
-- `src/reviewer/` — CLI 版保留，Web 版在 server/ 中独立实现
+- `src/reviewer/` — CLI 版保留。Web 版跳过自动校验，由用户通过交互式预览页进行人工校验（标注 + LLM 重提取）
 - `src/persistence.py` — 原样使用
 - `src/config.py` — 原样使用
 - `config/` — 原样使用
@@ -758,8 +795,8 @@ docker-compose exec api python -m server.app.scripts.create_admin
 
 ## 13. 安全考虑
 
-1. **文件上传**：限制大小（50MB）、类型白名单（.doc/.docx/.pdf）、病毒扫描（可选）
-2. **JWT**：access_token 24h 过期，仅 HttpOnly cookie 或 Authorization header
+1. **文件上传**：FastAPI 中间件限制大小（50MB）、类型白名单（.doc/.docx/.pdf）、病毒扫描（可选）。通过 Starlette `Request.stream()` + 大小计数器实现，拒绝超限文件
+2. **JWT**：access_token 24h + refresh_token 7d，通过 Authorization header 传递
 3. **SQL 注入**：SQLAlchemy ORM 参数化查询
 4. **XSS**：Vue 模板自动转义 + CSP header
 5. **CORS**：仅允许同域或指定域名
