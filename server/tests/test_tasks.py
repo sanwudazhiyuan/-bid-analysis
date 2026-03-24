@@ -135,3 +135,129 @@ async def test_progress_endpoint_requires_auth(client, test_user, db_session):
 
     resp = await client.get(f"/api/tasks/{task.id}/progress")
     assert resp.status_code in (401, 403)
+
+
+# ---------------------------------------------------------------------------
+# Task 3.1 tests: list, detail, delete
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_empty(client, test_user, auth_headers):
+    resp = await client.get("/api/tasks", headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "items" in data
+    assert "total" in data
+    assert data["total"] == 0
+    assert data["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_with_data(client, test_user, auth_headers, db_session):
+    from server.app.models.task import Task
+    import uuid
+
+    task = Task(
+        id=uuid.uuid4(),
+        user_id=test_user.id,
+        filename="test.docx",
+        file_path="/tmp/test.docx",
+        file_size=100,
+        status="completed",
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    resp = await client.get("/api/tasks", headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 1
+    assert len(data["items"]) == 1
+    assert data["items"][0]["filename"] == "test.docx"
+
+
+@pytest.mark.asyncio
+async def test_get_task_detail(client, test_user, auth_headers, db_session):
+    from server.app.models.task import Task
+    import uuid
+
+    task_id = uuid.uuid4()
+    task = Task(
+        id=task_id,
+        user_id=test_user.id,
+        filename="detail.docx",
+        file_path="/tmp/detail.docx",
+        file_size=200,
+        status="pending",
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    resp = await client.get(f"/api/tasks/{task_id}", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["filename"] == "detail.docx"
+
+
+@pytest.mark.asyncio
+async def test_get_task_detail_404(client, test_user, auth_headers):
+    import uuid
+
+    resp = await client.get(f"/api/tasks/{uuid.uuid4()}", headers=auth_headers)
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_task(client, test_user, auth_headers, db_session):
+    from server.app.models.task import Task
+    import uuid
+
+    task_id = uuid.uuid4()
+    task = Task(
+        id=task_id,
+        user_id=test_user.id,
+        filename="delete.docx",
+        file_path="/tmp/delete.docx",
+        file_size=100,
+        status="completed",
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    resp = await client.delete(f"/api/tasks/{task_id}", headers=auth_headers)
+    assert resp.status_code == 204
+
+    # Confirm deleted
+    get_resp = await client.get(f"/api/tasks/{task_id}", headers=auth_headers)
+    assert get_resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_task_404(client, test_user, auth_headers):
+    import uuid
+
+    resp = await client.delete(f"/api/tasks/{uuid.uuid4()}", headers=auth_headers)
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_isolation(client, test_user, admin_user, auth_headers, db_session):
+    """User should only see their own tasks."""
+    from server.app.models.task import Task
+    import uuid
+
+    # Create task for admin
+    task = Task(
+        id=uuid.uuid4(),
+        user_id=admin_user.id,
+        filename="admin.docx",
+        file_path="/tmp/admin.docx",
+        file_size=100,
+        status="completed",
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    # List as test_user
+    resp = await client.get("/api/tasks", headers=auth_headers)
+    assert resp.json()["total"] == 0

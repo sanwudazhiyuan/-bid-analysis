@@ -11,10 +11,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.app.database import get_db
 from server.app.deps import get_current_user
 from server.app.models.user import User
-from server.app.schemas.task import TaskResponse
-from server.app.services.task_service import create_task_from_upload
+from server.app.schemas.task import TaskListResponse, TaskResponse
+from server.app.services.task_service import (
+    create_task_from_upload,
+    delete_task,
+    get_task,
+    get_tasks,
+)
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+
+
+@router.get("", response_model=TaskListResponse)
+async def list_tasks(
+    page: int = 1,
+    page_size: int = 20,
+    status: str | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    items, total = await get_tasks(db, user.id, page, page_size, status)
+    return TaskListResponse(items=items, total=total, page=page, page_size=page_size)
 
 
 @router.post("", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
@@ -91,3 +108,26 @@ async def task_progress(
             await asyncio.sleep(1)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.get("/{task_id}", response_model=TaskResponse)
+async def get_task_detail(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    task = await get_task(db, task_id, user.id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+
+@router.delete("/{task_id}", status_code=204)
+async def remove_task(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    deleted = await delete_task(db, task_id, user.id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Task not found")
