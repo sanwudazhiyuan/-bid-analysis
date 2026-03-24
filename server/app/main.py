@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from server.app.routers import auth, tasks, download
+from server.app.routers import auth, tasks, download, preview
 
 app = FastAPI(title="招标文件分析系统", version="1.0.0")
 
@@ -18,6 +18,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(tasks.router)
 app.include_router(download.router)
+app.include_router(preview.router)
 
 
 @app.get("/api/health")
