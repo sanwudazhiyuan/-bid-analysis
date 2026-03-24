@@ -4,6 +4,7 @@
 可能需要合并"评标办法"和"评分表"两个独立章节。
 """
 import logging
+import re
 from pathlib import Path
 
 from src.models import TaggedParagraph
@@ -28,6 +29,53 @@ _RELEVANT_SECTION_KEYWORDS = [
     "后评价", "评价管理", "分配规则", "分配方式",
     "报价要求", "报价明细", "限价",
 ]
+
+
+_REF_PATTERNS = [
+    re.compile(r"详见[《「]?(.+?)[》」\s，。,.]|详见[《「]?(.+?)$"),
+    re.compile(r"按照?[《「]?(.+?)[》」]?的?规定"),
+    re.compile(r"据第\s*(\d+\.?\d*)\s*款"),
+    re.compile(r"见附[件表录]\s*[《「]?(.+?)[》」\s，。,.]|见附[件表录]\s*[《「]?(.+?)$"),
+    re.compile(r"参照[《「]?(.+?)[》」\s，。,.]|参照[《「]?(.+?)$"),
+]
+
+
+def _resolve_references(
+    selected: list[TaggedParagraph],
+    all_paragraphs: list[TaggedParagraph],
+    selected_indices: set[int],
+) -> list[TaggedParagraph]:
+    """检测已筛选段落中的交叉引用，从全文档追加被引用段落。
+
+    返回新追加的段落列表（不含已选中的）。
+    """
+    ref_targets: list[str] = []
+    for tp in selected:
+        for pattern in _REF_PATTERNS:
+            for match in pattern.finditer(tp.text):
+                # 多分支正则可能命中不同 group，取第一个非 None 的
+                target = next((g for g in match.groups() if g is not None), None)
+                if target:
+                    ref_targets.append(target)
+
+    if not ref_targets:
+        return []
+
+    appended: list[TaggedParagraph] = []
+    for tp in all_paragraphs:
+        if tp.index in selected_indices:
+            continue
+        for target in ref_targets:
+            if tp.section_title and target in tp.section_title:
+                appended.append(tp)
+                selected_indices.add(tp.index)
+                break
+            if target in tp.text and len(target) >= 2:
+                appended.append(tp)
+                selected_indices.add(tp.index)
+                break
+
+    return appended
 
 
 def _filter_paragraphs(tagged_paragraphs: list[TaggedParagraph]) -> list[TaggedParagraph]:
@@ -88,6 +136,12 @@ def _filter_paragraphs(tagged_paragraphs: list[TaggedParagraph]) -> list[TaggedP
             if tp.index not in selected_indices:
                 selected.append(tp)
                 selected_indices.add(tp.index)
+
+    # 交叉引用解析：检测已筛选段落中的引用，追加被引用段落
+    ref_appended = _resolve_references(selected, tagged_paragraphs, selected_indices)
+    if ref_appended:
+        selected.extend(ref_appended)
+        logger.info("module_c: 交叉引用追加了 %d 个段落", len(ref_appended))
 
     selected.sort(key=lambda tp: tp.index)
     return selected

@@ -79,6 +79,47 @@ def test_filter_paragraphs_includes_commercial_content():
     assert 6 not in filtered_indices, "无关段落不应被选中"
 
 
+def test_resolve_references_appends_referenced_paragraphs():
+    """当筛选段落中有'详见XX'引用时，应从全文档追加被引用段落"""
+    from src.extractor.module_c import _resolve_references
+    from src.models import TaggedParagraph
+
+    all_paragraphs = [
+        TaggedParagraph(index=0, text="评分标准详见评标办法前附表"),
+        TaggedParagraph(index=1, text="这是无关段落"),
+        TaggedParagraph(index=2, text="这是无关段落2"),
+        TaggedParagraph(index=3, text="评标办法前附表：评分项与分值", section_title="评标办法前附表"),
+        TaggedParagraph(index=4, text="技术评分30分，商务评分20分"),
+        TaggedParagraph(index=5, text="据第2.1款规定的标准执行"),
+        TaggedParagraph(index=6, text="第2.1款 卡片质量标准", section_title="2.1 卡片质量标准"),
+    ]
+    selected = [all_paragraphs[0], all_paragraphs[5]]
+    selected_indices = {0, 5}
+
+    resolved = _resolve_references(selected, all_paragraphs, selected_indices)
+    resolved_indices = {tp.index for tp in resolved}
+
+    assert 3 in resolved_indices, "应追加'评标办法前附表'段落"
+    assert 6 in resolved_indices, "应追加'第2.1款'段落"
+    assert 1 not in resolved_indices, "不应追加无关段落"
+
+
+def test_resolve_references_no_duplicates():
+    """已选中的段落不应被重复追加"""
+    from src.extractor.module_c import _resolve_references
+    from src.models import TaggedParagraph
+
+    all_paragraphs = [
+        TaggedParagraph(index=0, text="详见评标办法前附表", section_title="评标办法"),
+        TaggedParagraph(index=1, text="评标办法前附表内容", section_title="评标办法前附表"),
+    ]
+    selected = [all_paragraphs[0], all_paragraphs[1]]
+    selected_indices = {0, 1}
+
+    resolved = _resolve_references(selected, all_paragraphs, selected_indices)
+    assert len(resolved) == 0, "已选中的段落不应被重复追加"
+
+
 # ========== 需要 API Key 的测试 ==========
 
 
