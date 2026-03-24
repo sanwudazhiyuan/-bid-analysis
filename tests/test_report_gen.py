@@ -434,3 +434,92 @@ def test_render_report_text_sections_converted_to_table(tmp_path):
     )
     assert "甲方拥有银行卡" in all_table_text
     assert "甲乙双方" in all_table_text
+
+
+def test_render_report_full_module_c_structure(tmp_path):
+    """完整模块C结构：嵌套parent、note、多种表格类型"""
+    data = {
+        "schema_version": "1.0",
+        "modules": {
+            "module_c": {
+                "title": "C. 技术评分模块",
+                "sections": [
+                    {
+                        "id": "C1",
+                        "title": "评分分值构成",
+                        "type": "standard_table",
+                        "columns": ["评分部分", "分值", "权重"],
+                        "rows": [
+                            ["投标报价", "70分", "70%"],
+                            ["商务部分", "20分", "20%"],
+                            ["技术部分", "10分", "10%"],
+                        ],
+                    },
+                    {
+                        "id": "C2",
+                        "title": "报价评分标准（70分）",
+                        "type": "parent",
+                        "sections": [
+                            {
+                                "id": "C2.1",
+                                "title": "卡基部分（20分）",
+                                "type": "standard_table",
+                                "columns": ["评分规则", "分值范围"],
+                                "rows": [["等于基准价", "18分"]],
+                            },
+                        ],
+                    },
+                    {
+                        "id": "C3",
+                        "title": "商务评分标准（20分）",
+                        "type": "parent",
+                        "sections": [
+                            {
+                                "id": "C3.1",
+                                "title": "同类项目案例（6分）",
+                                "type": "standard_table",
+                                "columns": ["评分因素", "分值", "评分标准"],
+                                "rows": [["同类项目案例", "6分", "每个案例0.5分"]],
+                                "note": "证明材料要求：合同或协议",
+                            },
+                        ],
+                    },
+                    {
+                        "id": "C5",
+                        "title": "评分相等时的优先顺序",
+                        "type": "standard_table",
+                        "columns": ["优先顺序", "评分因素"],
+                        "rows": [["1", "投标报价低的优先"]],
+                    },
+                    {
+                        "id": "C6",
+                        "title": "报价要求",
+                        "type": "key_value_table",
+                        "columns": ["项目", "要求"],
+                        "rows": [["报价方式", "含税包干价格"]],
+                    },
+                ],
+            },
+        },
+    }
+    out = str(tmp_path / "report.docx")
+    render_report(data, out)
+
+    doc = Document(out)
+    full_text = "\n".join(p.text for p in doc.paragraphs)
+
+    # 验证所有编号标题存在
+    assert "C1" in full_text
+    assert "C2" in full_text
+    assert "C2.1" in full_text
+    assert "C3" in full_text
+    assert "C3.1" in full_text
+    assert "C5" in full_text
+    assert "C6" in full_text
+
+    # 验证关键内容
+    assert "技术评分模块" in full_text
+    assert "证明材料要求" in full_text
+
+    # 验证表格数量：C1(1) + C2.1(1) + C3.1(1) + C5(1) + C6(1) = 5
+    assert len(doc.tables) == 5
