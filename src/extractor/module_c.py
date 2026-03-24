@@ -1,7 +1,7 @@
-"""module_c: C. 评标办法与评分标准 提取模块
+"""module_c: C. 技术评分模块 提取模块
 
-最复杂的模块之一：需精确提取评分表结构（多层嵌套的评分项及其分值）。
-可能需要合并"评标办法"和"评分表"两个独立章节。
+提取评分分值构成、报价/商务/技术评分标准、报价要求、后评价管理、分配规则。
+支持多层嵌套子标题结构和交叉引用段落追加。
 """
 import logging
 import re
@@ -198,6 +198,6 @@ def extract_module_c(
         return None
 
     if "title" not in result:
-        result["title"] = "C. 评标办法与评分标准"
+        result["title"] = "C. 技术评分模块"
 
     return result
