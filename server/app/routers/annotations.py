@@ -2,6 +2,7 @@
 import uuid as _uuid_mod
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -80,3 +81,20 @@ async def delete_annotation(
         raise HTTPException(status_code=404)
     await db.delete(ann)
     await db.commit()
+
+
+class ReextractRequest(BaseModel):
+    module_key: str
+    section_id: str
+    annotation_ids: list[int]
+
+
+@router.post("/{task_id}/reextract")
+async def trigger_reextract(
+    task_id: str, body: ReextractRequest,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    # Lazy import to avoid Redis dependency in tests
+    from server.app.tasks.reextract_task import reextract_section
+    result = reextract_section.delay(task_id, body.module_key, body.section_id, body.annotation_ids)
+    return {"celery_task_id": result.id}

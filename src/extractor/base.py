@@ -171,3 +171,60 @@ def merge_batch_results(results: list[dict]) -> dict:
 
     merged_sections = [seen[sid] for sid in order]
     return {"sections": merged_sections}
+
+
+# ========== 带标注的重提取 ==========
+
+class ExtractError(Exception):
+    """LLM 提取失败异常"""
+    pass
+
+
+def reextract_with_annotations(
+    module_key: str,
+    section_id: str,
+    original_section: dict,
+    relevant_paragraphs: list,
+    annotations: list[dict],
+    settings: dict | None = None,
+) -> dict:
+    """带用户标注的 LLM 重提取。"""
+    import json as _json
+
+    annotation_lines = []
+    for ann in annotations:
+        row_idx = ann.get("row_index", "")
+        content = ann.get("content", "")
+        cell = ""
+        if row_idx is not None and original_section.get("rows"):
+            rows = original_section["rows"]
+            row = rows[row_idx] if isinstance(row_idx, int) and row_idx < len(rows) else []
+            cell = " | ".join(str(c) for c in row)
+        annotation_lines.append(f"- 第{row_idx}行「{cell}」: {content}")
+
+    para_text = "\n".join(
+        p.get("text", p) if isinstance(p, dict) else str(p)
+        for p in relevant_paragraphs
+    )
+
+    prompt = f"""你是招标文件分析专家。请根据用户的修改意见，对照原文重新提取以下内容。
+
+## 原始提取结果
+{_json.dumps(original_section, ensure_ascii=False, indent=2)}
+
+## 用户修改意见
+{chr(10).join(annotation_lines)}
+
+## 对应原文段落
+{para_text}
+
+## 要求
+1. 仔细对照原文，修正用户指出的问题
+2. 保持与原始结果相同的 JSON 结构
+3. 只修改用户指出的问题，其他内容保持不变"""
+
+    messages = build_messages("你是招标文件分析专家。", prompt)
+    result = call_qwen(messages, settings)
+    if result is None:
+        raise ExtractError(f"LLM 重提取失败: {module_key}/{section_id}")
+    return result
