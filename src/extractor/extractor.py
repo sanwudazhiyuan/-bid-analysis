@@ -1,4 +1,5 @@
 """提取层统一入口：依次调用 9 个模块，汇总结果。"""
+import importlib
 import logging
 from datetime import datetime
 
@@ -39,8 +40,6 @@ def extract_all(
             }
         }
     """
-    import importlib
-
     modules = {}
 
     for key, (module_path, func_name) in _MODULE_REGISTRY.items():
@@ -61,3 +60,17 @@ def extract_all(
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "modules": modules,
     }
+
+
+def extract_single_module(
+    module_key: str,
+    tagged_paragraphs: list[TaggedParagraph],
+    settings: dict | None = None,
+) -> dict | None:
+    """提取单个模块，供 Web Celery Worker 调用。"""
+    if module_key not in _MODULE_REGISTRY:
+        raise ValueError(f"Unknown module: {module_key}")
+    mod_path, func_name = _MODULE_REGISTRY[module_key]
+    mod = importlib.import_module(mod_path)
+    func = getattr(mod, func_name)
+    return func(tagged_paragraphs, settings)

@@ -19,4 +19,13 @@ async def upload_and_create_task(
     db: AsyncSession = Depends(get_db),
 ):
     task = await create_task_from_upload(db, file, user.id)
+
+    # Lazy import avoids Redis connection errors when the module is loaded in
+    # test environments that have no broker available.
+    from server.app.tasks.pipeline_task import run_pipeline  # noqa: PLC0415
+
+    celery_result = run_pipeline.delay(str(task.id))
+    task.celery_task_id = celery_result.id
+    await db.commit()
+    await db.refresh(task)
     return task
