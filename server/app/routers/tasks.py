@@ -1,6 +1,11 @@
 """Router for task management — file upload and task listing."""
 
-from fastapi import APIRouter, Depends, UploadFile, File, status
+import asyncio
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.app.database import get_db
@@ -29,3 +34,60 @@ async def upload_and_create_task(
     await db.commit()
     await db.refresh(task)
     return task
+
+
+@router.get("/{task_id}/progress")
+async def task_progress(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """SSE endpoint: stream Celery task progress from Redis.
+
+    Returns immediately when celery_task_id is None (task not yet dispatched).
+    Streams PROGRESS / SUCCESS / FAILURE states while the task is running.
+    """
+    import uuid as _uuid  # noqa: PLC0415
+    from server.app.models.task import Task  # noqa: PLC0415
+
+    try:
+        task_uuid = _uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    result = await db.execute(
+        select(Task).where(Task.id == task_uuid, Task.user_id == user.id)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    celery_task_id = task.celery_task_id
+
+    async def event_generator():
+        if not celery_task_id:
+            yield f"data: {json.dumps({'progress': 0, 'step': 'pending'})}\n\n"
+            return
+
+        # Lazy imports keep Redis out of the module-load path so unit tests
+        # that have no broker available can still import this module safely.
+        from celery.result import AsyncResult  # noqa: PLC0415
+        from server.app.tasks.celery_app import celery_app  # noqa: PLC0415
+
+        while True:
+            celery_result = AsyncResult(celery_task_id, app=celery_app)
+            if celery_result.state == "PROGRESS":
+                yield f"data: {json.dumps(celery_result.info)}\n\n"
+            elif celery_result.state == "SUCCESS":
+                yield f"data: {json.dumps({'progress': 100, 'step': 'completed'})}\n\n"
+                break
+            elif celery_result.state == "FAILURE":
+                yield (
+                    f"data: {json.dumps({'progress': -1, 'step': 'failed', 'error': str(celery_result.result)})}\n\n"
+                )
+                break
+            else:  # PENDING or STARTED or unknown
+                yield f"data: {json.dumps({'progress': 0, 'step': 'pending'})}\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
