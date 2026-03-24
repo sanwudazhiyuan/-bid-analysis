@@ -1,10 +1,12 @@
 <script setup lang="ts">
+import DefaultLayout from '../layouts/DefaultLayout.vue'
 import FileUpload from '../components/FileUpload.vue'
+import TaskList from '../components/TaskList.vue'
 </script>
 
 <template>
-  <div class="max-w-4xl mx-auto p-6">
-    <h1 class="text-2xl font-bold mb-6">招标文件分析系统</h1>
-    <FileUpload />
-  </div>
+  <DefaultLayout>
+    <FileUpload class="mb-8" />
+    <TaskList />
+  </DefaultLayout>
 </template>
