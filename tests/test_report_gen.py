@@ -273,7 +273,7 @@ def test_render_report_excludes_bid_format_and_checklist(tmp_path):
 
 
 def test_render_report_section_numbering(tmp_path):
-    """子标题应使用编号格式如 A.1, A.2"""
+    """子标题应使用 section id 作为编号前缀，如 A1, A2"""
     data = {
         "schema_version": "1.0",
         "modules": {
@@ -303,8 +303,59 @@ def test_render_report_section_numbering(tmp_path):
 
     doc = Document(out)
     full_text = "\n".join(p.text for p in doc.paragraphs)
-    assert "A.1" in full_text
-    assert "A.2" in full_text
+    assert "A1" in full_text
+    assert "A2" in full_text
+
+
+def test_render_report_nested_section_numbering(tmp_path):
+    """嵌套 sections 应使用 id 字段作为编号，如 C2.1, C2.2"""
+    data = {
+        "schema_version": "1.0",
+        "modules": {
+            "module_c": {
+                "title": "C. 技术评分模块",
+                "sections": [
+                    {
+                        "id": "C1",
+                        "title": "评分分值构成",
+                        "type": "standard_table",
+                        "columns": ["评分部分", "分值"],
+                        "rows": [["报价", "70分"], ["商务", "20分"]],
+                    },
+                    {
+                        "id": "C2",
+                        "title": "报价评分标准（70分）",
+                        "type": "parent",
+                        "sections": [
+                            {
+                                "id": "C2.1",
+                                "title": "卡基部分（20分）",
+                                "type": "standard_table",
+                                "columns": ["规则", "分值"],
+                                "rows": [["等于基准价", "18分"]],
+                            },
+                            {
+                                "id": "C2.2",
+                                "title": "特殊工艺部分（15分）",
+                                "type": "standard_table",
+                                "columns": ["规则", "分值"],
+                                "rows": [["等于基准价", "13.5分"]],
+                            },
+                        ],
+                    },
+                ],
+            },
+        },
+    }
+    out = str(tmp_path / "report.docx")
+    render_report(data, out)
+
+    doc = Document(out)
+    full_text = "\n".join(p.text for p in doc.paragraphs)
+    assert "C1" in full_text, "应显示 C1 编号"
+    assert "C2" in full_text, "应显示 C2 编号"
+    assert "C2.1" in full_text, "应显示 C2.1 编号"
+    assert "C2.2" in full_text, "应显示 C2.2 编号"
 
 
 def test_render_report_text_sections_converted_to_table(tmp_path):

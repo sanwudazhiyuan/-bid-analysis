@@ -108,14 +108,17 @@ def _render_sections(
     style_mgr: StyleManager,
     module_letter: str,
 ) -> None:
-    """渲染 sections 列表，子标题使用编号格式（如 A.1, A.2）。"""
+    """渲染 sections 列表，使用 section 的 id 字段作为编号前缀。"""
     for idx, section in enumerate(sections, 1):
         section_type = section.get("type", "")
         section_title = section.get("title", "")
+        section_id = section.get("id", "")
 
-        # 子标题：使用编号格式 A.1 XXX
+        # 子标题：优先使用 id 字段作为编号前缀
         if section_title:
-            if module_letter:
+            if section_id:
+                numbered_title = f"{section_id} {section_title}"
+            elif module_letter:
                 numbered_title = f"{module_letter}.{idx} {section_title}"
             else:
                 numbered_title = section_title
@@ -125,17 +128,20 @@ def _render_sections(
 
         # 渲染内容 — 只允许表格，并添加勾选列
         if section_type in ("key_value_table", "standard_table"):
-            # 去掉 title 避免 table_builder 重复渲染标题，添加勾选列
             section_no_title = {k: v for k, v in section.items() if k != "title"}
             section_with_check = _add_checkbox_column(section_no_title)
             table_builder.build(section_with_check, doc)
         elif section_type in ("text", "template"):
-            # text/template 内容转为单列表格，添加勾选列
             content = section.get("content", "")
             if content:
                 _render_text_as_table(doc, section_title, content, table_builder, style_mgr)
 
-        # 递归处理子 sections
+        # note 字段渲染
+        note = section.get("note", "")
+        if note:
+            _render_note(doc, note, style_mgr)
+
+        # 递归处理子 sections（parent type）
         sub_sections = section.get("sections", [])
         if sub_sections:
             _render_sections(doc, sub_sections, table_builder, style_mgr, module_letter)
@@ -156,3 +162,11 @@ def _render_text_as_table(
     }
     section_with_check = _add_checkbox_column(section_as_table)
     table_builder.build(section_with_check, doc)
+
+
+def _render_note(doc: Document, note: str, style_mgr: StyleManager) -> None:
+    """渲染 note 备注文本，灰色小字。"""
+    para = doc.add_paragraph()
+    run = para.add_run(note)
+    run.font.size = Pt(9)
+    run.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
