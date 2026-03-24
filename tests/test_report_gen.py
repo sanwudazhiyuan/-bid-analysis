@@ -358,6 +358,43 @@ def test_render_report_nested_section_numbering(tmp_path):
     assert "C2.2" in full_text, "应显示 C2.2 编号"
 
 
+def test_render_report_note_field(tmp_path):
+    """section 的 note 字段应渲染在表格下方为灰色小字"""
+    data = {
+        "schema_version": "1.0",
+        "modules": {
+            "module_c": {
+                "title": "C. 技术评分模块",
+                "sections": [
+                    {
+                        "id": "C3.1",
+                        "title": "同类项目案例（6分）",
+                        "type": "standard_table",
+                        "columns": ["评分因素", "分值"],
+                        "rows": [["同类项目案例", "6分"]],
+                        "note": "证明材料要求：合同或协议（需包含合同首页、标的物名称）",
+                    },
+                ],
+            },
+        },
+    }
+    out = str(tmp_path / "report.docx")
+    render_report(data, out)
+
+    doc = Document(out)
+    full_text = "\n".join(p.text for p in doc.paragraphs)
+    assert "证明材料要求" in full_text, "note 内容应出现在段落中"
+
+    # 验证 note 文字为灰色
+    found_gray = False
+    for para in doc.paragraphs:
+        for run in para.runs:
+            if "证明材料要求" in run.text:
+                if run.font.color.rgb == RGBColor(0x99, 0x99, 0x99):
+                    found_gray = True
+    assert found_gray, "note 文字应为灰色"
+
+
 def test_render_report_text_sections_converted_to_table(tmp_path):
     """text 类型的 section 应转为单列表格而非文字段落"""
     data = {
