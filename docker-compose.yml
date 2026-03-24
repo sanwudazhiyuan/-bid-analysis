@@ -3,6 +3,7 @@ name: bid-analyzer
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: bid_analyzer
       POSTGRES_USER: biduser
@@ -18,6 +19,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     volumes:
       - redisdata:/data
     ports:
@@ -31,6 +33,7 @@ services:
     build:
       context: .
       dockerfile: server/Dockerfile
+    restart: unless-stopped
     command: uvicorn server.app.main:app --host 0.0.0.0 --port 8000 --reload
     environment:
       DATABASE_URL: postgresql+asyncpg://biduser:${DB_PASSWORD:-devpassword}@postgres:5432/bid_analyzer
@@ -47,11 +50,16 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      retries: 3
 
   worker:
     build:
       context: .
       dockerfile: server/Dockerfile
+    restart: unless-stopped
     command: celery -A server.app.tasks.celery_app worker --loglevel=info --concurrency=2
     environment:
       DATABASE_URL: postgresql+asyncpg://biduser:${DB_PASSWORD:-devpassword}@postgres:5432/bid_analyzer
@@ -70,6 +78,7 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile
+    restart: unless-stopped
     ports:
       - "80:80"
     depends_on:
