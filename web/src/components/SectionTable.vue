@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { usePreviewStore } from '../stores/previewStore'
 import type { Section } from '../types/preview'
+import AnnotationBadge from './AnnotationBadge.vue'
 
 defineOptions({ name: 'SectionTable' })
 
@@ -9,6 +10,12 @@ const props = defineProps<{
   moduleKey: string
   taskId: string
   checkboxData: Record<string, boolean>
+  annotationCounts?: Record<number, number>
+  selectedRow?: number | null
+}>()
+
+const emit = defineEmits<{
+  'select-row': [rowIndex: number]
 }>()
 
 const store = usePreviewStore()
@@ -20,6 +27,14 @@ function isChecked(rowIndex: number): boolean {
 function toggle(rowIndex: number) {
   const current = isChecked(rowIndex)
   store.toggleCheckbox(props.taskId, props.moduleKey, props.section.id, rowIndex, !current)
+}
+
+function getAnnotationCount(rowIndex: number): number {
+  return props.annotationCounts?.[rowIndex] ?? 0
+}
+
+function handleRowClick(rowIndex: number) {
+  emit('select-row', rowIndex)
 }
 </script>
 
@@ -35,16 +50,26 @@ function toggle(rowIndex: number) {
             {{ col }}
           </th>
           <th class="border px-3 py-2 w-12 text-center font-medium text-gray-600">确认</th>
+          <th class="border px-3 py-2 w-12 text-center font-medium text-gray-600">标注</th>
         </tr>
       </thead>
       <tbody>
-        <tr v-for="(row, rowIdx) in section.rows" :key="rowIdx" class="hover:bg-blue-50">
+        <tr
+          v-for="(row, rowIdx) in section.rows"
+          :key="rowIdx"
+          class="hover:bg-blue-50 cursor-pointer"
+          :class="{ 'bg-yellow-50': selectedRow === rowIdx }"
+          @click="handleRowClick(rowIdx)"
+        >
           <td v-for="(cell, cellIdx) in row" :key="cellIdx" class="border px-3 py-2 text-gray-700">
             {{ cell }}
           </td>
           <td class="border px-3 py-2 text-center">
             <input type="checkbox" :checked="isChecked(rowIdx)" @click.stop="toggle(rowIdx)"
               class="w-4 h-4 text-blue-600 rounded" />
+          </td>
+          <td class="border px-3 py-2 text-center">
+            <AnnotationBadge :count="getAnnotationCount(rowIdx)" />
           </td>
         </tr>
       </tbody>
@@ -64,6 +89,9 @@ function toggle(rowIndex: number) {
         v-for="sub in section.sections" :key="sub.id"
         :section="sub" :module-key="moduleKey" :task-id="taskId"
         :checkbox-data="checkboxData"
+        :annotation-counts="annotationCounts"
+        :selected-row="selectedRow"
+        @select-row="emit('select-row', $event)"
       />
     </div>
   </div>
