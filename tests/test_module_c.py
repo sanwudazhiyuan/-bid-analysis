@@ -55,6 +55,30 @@ def test_module_c_filter_paragraphs(indexed_doc):
     assert len(filtered) > 0, "应筛选出评分标准相关段落"
 
 
+def test_filter_paragraphs_includes_commercial_content():
+    """扩展后的筛选应包含报价要求、后评价、分配规则相关段落"""
+    from src.extractor.module_c import _filter_paragraphs
+    from src.models import TaggedParagraph
+
+    paragraphs = [
+        TaggedParagraph(index=0, text="评分分值构成表", section_title="评标办法"),
+        TaggedParagraph(index=1, text="报价方式：含税包干价格"),
+        TaggedParagraph(index=2, text="单价最高限价：3.32元/张"),
+        TaggedParagraph(index=3, text="后评价管理：季度评价指标"),
+        TaggedParagraph(index=4, text="分配规则：首次分配50%：50%"),
+        TaggedParagraph(index=5, text="履约保证金金额为20万元"),
+        TaggedParagraph(index=6, text="这是一段无关内容"),
+    ]
+    filtered = _filter_paragraphs(paragraphs)
+    filtered_indices = {tp.index for tp in filtered}
+    assert 0 in filtered_indices, "评分相关段落应被选中"
+    assert 1 in filtered_indices, "报价方式段落应被选中"
+    assert 2 in filtered_indices, "限价段落应被选中"
+    assert 3 in filtered_indices, "后评价段落应被选中"
+    assert 4 in filtered_indices, "分配规则段落应被选中"
+    assert 6 not in filtered_indices, "无关段落不应被选中"
+
+
 # ========== 需要 API Key 的测试 ==========
 
 

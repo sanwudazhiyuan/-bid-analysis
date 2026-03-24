@@ -20,11 +20,13 @@ logger = logging.getLogger(__name__)
 
 PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" / "module_c.txt"
 
-_RELEVANT_TAGS = {"评分", "报价"}
+_RELEVANT_TAGS = {"评分", "报价", "合同条款", "商务要求"}
 _RELEVANT_SECTION_KEYWORDS = [
     "评标", "评分", "评审", "打分", "计分", "得分",
     "评标办法", "评分标准", "评分表", "评标标准",
     "报价", "价格", "商务", "技术评审",
+    "后评价", "评价管理", "分配规则", "分配方式",
+    "报价要求", "报价明细", "限价",
 ]
 
 
@@ -42,6 +44,11 @@ def _filter_paragraphs(tagged_paragraphs: list[TaggedParagraph]) -> list[TaggedP
         "报价得分", "价格得分", "技术得分", "商务得分",
         "最低价", "基准价", "综合评分", "评标委员会",
         "扣分", "加分", "不得分",
+        # 报价与商务扩展
+        "报价方式", "报价范围", "报价限制", "限价", "单价",
+        "后评价", "评价指标", "评价运用",
+        "分配规则", "分配比例",
+        "履约保证金",
     ]
 
     selected = []
