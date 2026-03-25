@@ -60,6 +60,15 @@
   --color-danger: oklch(55% 0.2 27);
   --color-danger-light: oklch(95% 0.03 27);
   --color-danger-foreground: oklch(30% 0.12 27);
+
+  /* 交互/信息色 — 用于表格悬停行、选中行、复选框、进度条等非品牌蓝色场景 */
+  --color-info: oklch(55% 0.18 250);
+  --color-info-light: oklch(96% 0.02 250);
+  --color-info-foreground: oklch(30% 0.12 250);
+
+  /* 高亮色 — 用于表格选中行、批注标记等 */
+  --color-highlight: oklch(90% 0.08 85);
+  --color-highlight-foreground: oklch(35% 0.1 75);
 }
 
 @layer base {
@@ -94,6 +103,12 @@
 | 成功状态 | `bg-green-100 text-green-700` | `bg-success-light text-success-foreground` |
 | 警告状态 | `bg-amber-50 text-amber-700` | `bg-warning-light text-warning-foreground` |
 | 错误状态 | `bg-red-50 text-red-800` | `bg-danger-light text-danger-foreground` |
+| 表格悬停行 | `bg-blue-50` | `bg-info-light` |
+| 表格选中行 | `bg-yellow-50` | `bg-highlight` |
+| 复选框/进度条 | `bg-blue-600` | `bg-info` |
+| 批注标记 | `bg-yellow-100 text-yellow-800` | `bg-highlight text-highlight-foreground` |
+| 链接/信息文字 | `text-blue-600` | `text-info` |
+| 禁用状态 | 各组件自行处理 | 统一使用 `disabled:opacity-50 disabled:pointer-events-none` |
 
 ### 3. 图标替换
 
@@ -140,6 +155,32 @@
 | `web/src/views/AdminUsersView.vue` | 颜色语义化 |
 | `web/src/views/FilePreviewView.vue` | 颜色语义化 |
 | `web/src/layouts/SidebarLayout.vue` | 背景色语义化 |
+| `web/src/components/UploadStage.vue` | 紫色 → 语义色 + Emoji → Lucide |
+| `web/src/components/UserMenu.vue` | 头像/登出颜色语义化 |
+| `web/src/components/SectionTable.vue` | 悬停/选中行 → info-light/highlight + 复选框色 |
+| `web/src/components/ModuleNav.vue` | 蓝色 → primary 语义色 |
+| `web/src/components/AnnotationBadge.vue` | 黄色 → highlight 语义色 |
+| `web/src/components/TaskProgress.vue` | 进度条/状态色语义化 |
+| `web/src/components/FileUpload.vue` | 蓝色 → primary 语义色 |
+| `web/src/components/DownloadCard.vue` | 链接色语义化 |
+
+## 无障碍与对比度
+
+所有令牌颜色需满足 WCAG AA 标准（正文文字对比度 >= 4.5:1）。实施时需验证：
+
+- `--color-primary`（oklch 45% 0.15 250）在白色背景上的对比度
+- `--color-primary-foreground` 在 `--color-primary` 背景上的对比度
+- 各语义色 foreground 在对应 light 背景上的对比度
+
+如有不达标，调整 oklch 明度值直至合规。
+
+## 遗留文件处理
+
+- `web/src/views/PreviewView.vue` — 未被路由引用，属遗留文件，**不在本次改动范围内**，后续可删除
+
+## 命名说明
+
+- `--color-border` 生成的工具类为 `border-border`（如 `border-border`、`border-t-border`），这是 Tailwind v4 中 shadcn/ui 等主流项目的通用命名约定，已验证可正常工作
 
 ## 不做的事情
 
