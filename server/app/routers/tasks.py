@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+import uuid as _uuid
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from fastapi.responses import StreamingResponse
@@ -131,3 +133,115 @@ async def remove_task(
     deleted = await delete_task(db, task_id, user.id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Task not found")
+
+
+@router.post("/{task_id}/continue")
+async def continue_task(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Dispatch run_generate for a task in review status."""
+    from server.app.models.task import Task  # noqa: PLC0415
+
+    try:
+        task_uuid = _uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    result = await db.execute(
+        select(Task).where(Task.id == task_uuid, Task.user_id == user.id)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if task.status != "review":
+        raise HTTPException(status_code=409, detail=f"Task is not in review status (current: {task.status})")
+
+    from server.app.tasks.generate_task import run_generate  # noqa: PLC0415
+
+    celery_result = run_generate.delay(str(task.id))
+    task.celery_task_id = celery_result.id
+    task.status = "generating"
+    await db.commit()
+
+    return {"task_id": str(task.id), "status": "generating"}
+
+
+@router.get("/{task_id}/parsed")
+async def get_parsed(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return parsed paragraphs from disk."""
+    from server.app.models.task import Task  # noqa: PLC0415
+
+    try:
+        task_uuid = _uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    result = await db.execute(
+        select(Task).where(Task.id == task_uuid, Task.user_id == user.id)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if not task.parsed_path or not os.path.exists(task.parsed_path):
+        raise HTTPException(status_code=404, detail="Parsed file not found")
+
+    with open(task.parsed_path, "r", encoding="utf-8") as f:
+        paragraphs = json.load(f)
+
+    return {"paragraphs": paragraphs}
+
+
+@router.post("/{task_id}/bulk-reextract")
+async def bulk_reextract(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Dispatch run_bulk_reextract for modules with pending annotations."""
+    from server.app.models.task import Task  # noqa: PLC0415
+    from server.app.models.annotation import Annotation  # noqa: PLC0415
+
+    try:
+        task_uuid = _uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    result = await db.execute(
+        select(Task).where(Task.id == task_uuid, Task.user_id == user.id)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if task.status != "review":
+        raise HTTPException(status_code=409, detail=f"Task is not in review status (current: {task.status})")
+
+    ann_result = await db.execute(
+        select(Annotation).where(
+            Annotation.task_id == task_uuid,
+            Annotation.status == "pending",
+        )
+    )
+    annotations = ann_result.scalars().all()
+
+    if not annotations:
+        raise HTTPException(status_code=400, detail="No pending annotations found")
+
+    modules = list({ann.module_key for ann in annotations})
+
+    from server.app.tasks.bulk_reextract_task import run_bulk_reextract  # noqa: PLC0415
+
+    celery_result = run_bulk_reextract.delay(str(task.id))
+    task.celery_task_id = celery_result.id
+    task.status = "reprocessing"
+    await db.commit()
+
+    return {"task_id": str(task.id), "status": "reprocessing", "modules": modules}
