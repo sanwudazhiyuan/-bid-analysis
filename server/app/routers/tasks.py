@@ -84,6 +84,7 @@ async def task_progress(
     celery_task_id = task.celery_task_id
 
     async def event_generator():
+        nonlocal celery_task_id
         if not celery_task_id:
             yield f"data: {json.dumps({'progress': 0, 'step': 'pending'})}\n\n"
             return
@@ -98,7 +99,23 @@ async def task_progress(
             if celery_result.state == "PROGRESS":
                 yield f"data: {json.dumps(celery_result.info)}\n\n"
             elif celery_result.state == "SUCCESS":
-                yield f"data: {json.dumps({'progress': 100, 'step': 'completed'})}\n\n"
+                # Check DB status — pipeline may have stopped at 'review'
+                result = await db.execute(
+                    select(Task).where(Task.id == task_uuid)
+                )
+                db_task = result.scalar_one_or_none()
+                if db_task and db_task.status == "review":
+                    yield f"data: {json.dumps({'progress': 90, 'step': 'review'})}\n\n"
+                elif db_task and db_task.status in ("generating", "reprocessing"):
+                    # New celery task was dispatched, follow it
+                    new_id = db_task.celery_task_id
+                    if new_id and new_id != celery_task_id:
+                        celery_task_id = new_id
+                        await asyncio.sleep(1)
+                        continue
+                    yield f"data: {json.dumps({'progress': db_task.progress, 'step': db_task.status})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'progress': 100, 'step': 'completed'})}\n\n"
                 break
             elif celery_result.state == "FAILURE":
                 yield (
