@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from server.app.routers import auth, tasks, download, preview, annotations, users
+from server.app.routers import auth, tasks, download, preview, annotations, users, files
 
 app = FastAPI(title="招标文件分析系统", version="1.0.0")
 
@@ -44,6 +44,7 @@ app.include_router(download.router)
 app.include_router(preview.router)
 app.include_router(annotations.router)
 app.include_router(users.router)
+app.include_router(files.router)
 
 
 @app.get("/api/health")
