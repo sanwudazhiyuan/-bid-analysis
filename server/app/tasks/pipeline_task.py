@@ -30,9 +30,6 @@ def run_pipeline(self, task_id: str):
     from src.parser.unified import parse_document
     from src.indexer.indexer import build_index
     from src.extractor.extractor import extract_single_module
-    from src.generator.report_gen import render_report
-    from src.generator.format_gen import render_format
-    from src.generator.checklist_gen import render_checklist
     from src.persistence import save_parsed, save_indexed, save_extracted
     from src.config import load_settings
 
@@ -47,9 +44,7 @@ def run_pipeline(self, task_id: str):
         db.commit()
 
     data_dir = os.path.join(settings.DATA_DIR, "intermediate", task_id)
-    output_dir = os.path.join(settings.DATA_DIR, "output", task_id)
     os.makedirs(data_dir, exist_ok=True)
-    os.makedirs(output_dir, exist_ok=True)
 
     try:
         # Layer 1: Parse (0-10%)
@@ -110,48 +105,19 @@ def run_pipeline(self, task_id: str):
 
         with Session(_sync_engine) as db:
             task = _get_task(db, task_id)
-            task.status = "generating"
+            task.status = "review"
             task.extracted_path = extracted_path
             task.extracted_data = extracted
+            task.progress = 90
             db.commit()
 
-        # Layer 4: Generate (90-100%)
+        # Pipeline stops here — user reviews before generation
         self.update_state(
             state="PROGRESS",
-            meta={"step": "generating", "detail": "生成文档中...", "progress": 95},
+            meta={"step": "review", "detail": "等待人工审核...", "progress": 90},
         )
-        stem = os.path.splitext(filename)[0]
-        report_path = os.path.join(output_dir, f"{stem}_分析报告.docx")
-        format_path = os.path.join(output_dir, f"{stem}_投标文件格式.docx")
-        checklist_path = os.path.join(output_dir, f"{stem}_资料清单.docx")
 
-        render_report(extracted, report_path)
-        render_format(extracted, format_path)
-        render_checklist(extracted, checklist_path)
-
-        # Complete
-        with Session(_sync_engine) as db:
-            task = _get_task(db, task_id)
-            task.status = "completed"
-            task.progress = 100
-            task.completed_at = datetime.datetime.now(datetime.timezone.utc)
-
-            from server.app.models.generated_file import GeneratedFile
-            for ftype, fpath in [
-                ("report", report_path),
-                ("format", format_path),
-                ("checklist", checklist_path),
-            ]:
-                size = os.path.getsize(fpath) if os.path.exists(fpath) else 0
-                db.add(GeneratedFile(
-                    task_id=_uuid.UUID(task_id),
-                    file_type=ftype,
-                    file_path=fpath,
-                    file_size=size,
-                ))
-            db.commit()
-
-        return {"status": "completed", "task_id": task_id}
+        return {"status": "review", "task_id": task_id}
 
     except Exception as e:
         with Session(_sync_engine) as db:

@@ -11,5 +11,10 @@ celery_app.conf.update(
     timezone="Asia/Shanghai",
     task_track_started=True,
 )
-# Auto-discover task modules in this package
-celery_app.autodiscover_tasks(["server.app.tasks"])
+# Explicitly include task modules (autodiscover only finds 'tasks.py')
+celery_app.conf.include = [
+    "server.app.tasks.pipeline_task",
+    "server.app.tasks.reextract_task",
+    "server.app.tasks.generate_task",
+    "server.app.tasks.bulk_reextract_task",
+]
