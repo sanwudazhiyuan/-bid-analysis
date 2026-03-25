@@ -12,6 +12,7 @@ import PreviewStage from '../components/PreviewStage.vue'
 const store = useAnalysisStore()
 const paragraphs = ref<Array<{ index: number; text: string; style: string }>>([])
 const filename = ref('')
+const reviewAnnotations = ref<import('../types/annotation').Annotation[]>([])
 
 let sseInstance: ReturnType<typeof useSSE> | null = null
 let annotationHelper: ReturnType<typeof useAnnotation> | null = null
@@ -77,6 +78,7 @@ async function loadReviewData() {
 
     annotationHelper = useAnnotation(store.currentTaskId)
     await annotationHelper.load()
+    reviewAnnotations.value = annotationHelper.annotations.value
   } catch {
     // ignore
   }
@@ -91,12 +93,14 @@ watch(() => store.stage, (newStage) => {
 async function handleAddAnnotation(moduleKey: string, content: string) {
   if (annotationHelper) {
     await annotationHelper.add(moduleKey, moduleKey, null, content)
+    reviewAnnotations.value = [...annotationHelper.annotations.value]
   }
 }
 
 async function handleRemoveAnnotation(annId: number) {
   if (annotationHelper) {
     await annotationHelper.remove(annId)
+    reviewAnnotations.value = [...annotationHelper.annotations.value]
   }
 }
 
@@ -133,7 +137,7 @@ function handleReset() {
       v-else-if="store.stage === 'review' && store.extractedData"
       :extracted-data="store.extractedData"
       :paragraphs="paragraphs"
-      :annotations="annotationHelper?.annotations.value || []"
+      :annotations="reviewAnnotations"
       :task-id="store.currentTaskId!"
       @skip="handleSkipReview"
       @submit="handleSubmitAnnotations"

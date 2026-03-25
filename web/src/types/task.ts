@@ -6,6 +6,7 @@ export interface Task {
   current_step: string | null
   progress: number
   error_message: string | null
+  extracted_data: Record<string, any> | null
   created_at: string
   started_at: string | null
   completed_at: string | null

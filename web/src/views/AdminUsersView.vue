@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import DefaultLayout from '../layouts/DefaultLayout.vue'
 import client from '../api/client'
 
 const users = ref<any[]>([])
@@ -29,7 +28,7 @@ onMounted(loadUsers)
 </script>
 
 <template>
-  <DefaultLayout>
+  <div class="p-6">
     <div class="flex items-center justify-between mb-6">
       <h1 class="text-xl font-bold">用户管理</h1>
       <button @click="showCreate = true" class="px-4 py-2 bg-blue-600 text-white rounded-md text-sm hover:bg-blue-700">创建用户</button>
@@ -71,5 +70,5 @@ onMounted(loadUsers)
         </tbody>
       </table>
     </div>
-  </DefaultLayout>
+  </div>
 </template>
