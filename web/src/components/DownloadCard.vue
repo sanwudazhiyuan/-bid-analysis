@@ -24,9 +24,9 @@ async function download() {
 </script>
 
 <template>
-  <div class="flex items-center justify-between bg-white border rounded-lg px-4 py-3">
+  <div class="flex items-center justify-between bg-surface border rounded-lg px-4 py-3">
     <span class="text-sm font-medium">{{ label }}</span>
-    <button @click="download" :disabled="downloading" class="text-blue-600 hover:underline text-sm disabled:opacity-50">
+    <button @click="download" :disabled="downloading" class="text-info hover:underline text-sm disabled:opacity-50">
       {{ downloading ? '下载中...' : '下载' }}
     </button>
   </div>

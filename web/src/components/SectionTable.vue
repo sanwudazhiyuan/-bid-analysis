@@ -40,48 +40,50 @@ function handleRowClick(rowIndex: number) {
 
 <template>
   <div class="mb-6">
-    <h3 class="text-sm font-semibold text-gray-700 mb-2">{{ section.id }} {{ section.title }}</h3>
+    <h3 class="text-sm font-semibold text-text-secondary mb-2">{{ section.id }} {{ section.title }}</h3>
 
     <!-- Table type sections -->
-    <table v-if="section.columns && section.rows" class="w-full text-sm border-collapse border">
-      <thead>
-        <tr class="bg-gray-50">
-          <th v-for="col in section.columns" :key="col" class="border px-3 py-2 text-left font-medium text-gray-600">
-            {{ col }}
-          </th>
-          <th class="border px-3 py-2 w-12 text-center font-medium text-gray-600">确认</th>
-          <th class="border px-3 py-2 w-12 text-center font-medium text-gray-600">标注</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr
-          v-for="(row, rowIdx) in section.rows"
-          :key="rowIdx"
-          class="hover:bg-blue-50 cursor-pointer"
-          :class="{ 'bg-yellow-50': selectedRow === rowIdx }"
-          @click="handleRowClick(rowIdx)"
-        >
-          <td v-for="(cell, cellIdx) in row" :key="cellIdx" class="border px-3 py-2 text-gray-700">
-            {{ cell }}
-          </td>
-          <td class="border px-3 py-2 text-center">
-            <input type="checkbox" :checked="isChecked(rowIdx)" @click.stop="toggle(rowIdx)"
-              class="w-4 h-4 text-blue-600 rounded" />
-          </td>
-          <td class="border px-3 py-2 text-center">
-            <AnnotationBadge :count="getAnnotationCount(rowIdx)" />
-          </td>
-        </tr>
-      </tbody>
-    </table>
+    <div class="overflow-x-auto">
+      <table v-if="section.columns && section.rows" class="w-full text-sm border-collapse border">
+        <thead>
+          <tr class="bg-background">
+            <th v-for="col in section.columns" :key="col" class="border px-3 py-2 text-left font-medium text-text-secondary">
+              {{ col }}
+            </th>
+            <th class="border px-3 py-2 w-12 text-center font-medium text-text-secondary">确认</th>
+            <th class="border px-3 py-2 w-12 text-center font-medium text-text-secondary">标注</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="(row, rowIdx) in section.rows"
+            :key="rowIdx"
+            class="hover:bg-info-light cursor-pointer"
+            :class="{ 'bg-highlight': selectedRow === rowIdx }"
+            @click="handleRowClick(rowIdx)"
+          >
+            <td v-for="(cell, cellIdx) in row" :key="cellIdx" class="border px-3 py-2 text-text-secondary">
+              {{ cell }}
+            </td>
+            <td class="border px-3 py-2 text-center">
+              <input type="checkbox" :checked="isChecked(rowIdx)" @click.stop="toggle(rowIdx)"
+                class="w-4 h-4 text-info rounded" />
+            </td>
+            <td class="border px-3 py-2 text-center">
+              <AnnotationBadge :count="getAnnotationCount(rowIdx)" />
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
 
     <!-- Text type sections -->
-    <div v-else-if="section.content" class="bg-gray-50 p-3 rounded text-sm text-gray-700">
+    <div v-else-if="section.content" class="bg-background p-3 rounded text-sm text-text-secondary">
       {{ section.content }}
     </div>
 
     <!-- Note field -->
-    <p v-if="section.note" class="text-xs text-gray-400 mt-1">{{ section.note }}</p>
+    <p v-if="section.note" class="text-xs text-text-muted mt-1">{{ section.note }}</p>
 
     <!-- Nested sections (parent type) -->
     <div v-if="section.sections" class="ml-4 mt-3">
