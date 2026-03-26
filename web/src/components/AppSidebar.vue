@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { useRoute } from 'vue-router'
+import { PenLine, FolderOpen, BarChart3, Ruler, ClipboardList } from 'lucide-vue-next'
 import UserMenu from './UserMenu.vue'
 
 const route = useRoute()
 
 const navItems = [
-  { path: '/', label: '招标解读', icon: '📝', group: 'main' },
-  { path: '/files/bid-documents', label: '招标文件', icon: '📁', group: 'files' },
-  { path: '/files/reports', label: '解析报告', icon: '📊', group: 'files' },
-  { path: '/files/formats', label: '文件格式', icon: '📐', group: 'files' },
-  { path: '/files/checklists', label: '资料清单', icon: '📋', group: 'files' },
+  { path: '/', label: '招标解读', icon: PenLine, group: 'main' },
+  { path: '/files/bid-documents', label: '招标文件', icon: FolderOpen, group: 'files' },
+  { path: '/files/reports', label: '解析报告', icon: BarChart3, group: 'files' },
+  { path: '/files/formats', label: '文件格式', icon: Ruler, group: 'files' },
+  { path: '/files/checklists', label: '资料清单', icon: ClipboardList, group: 'files' },
 ]
 
 function isActive(path: string) {
@@ -18,8 +19,8 @@ function isActive(path: string) {
 </script>
 
 <template>
-  <aside class="w-[200px] min-w-[200px] bg-white border-r border-gray-200 flex flex-col h-screen">
-    <div class="px-4 py-4 font-bold text-gray-800 text-base">
+  <aside class="w-[200px] min-w-[200px] bg-surface border-r border-border flex flex-col h-screen">
+    <div class="px-4 py-4 font-bold text-text-primary text-base">
       招标分析系统
     </div>
 
@@ -32,16 +33,16 @@ function isActive(path: string) {
         :class="[
           'flex items-center gap-2 px-4 py-2.5 text-sm transition-colors',
           isActive(item.path)
-            ? 'active bg-purple-50 text-purple-700 font-medium border-l-[3px] border-purple-600'
-            : 'text-gray-600 hover:bg-gray-50 border-l-[3px] border-transparent'
+            ? 'active bg-primary-light text-primary font-medium border-l-[3px] border-primary'
+            : 'text-text-secondary hover:bg-background border-l-[3px] border-transparent'
         ]"
       >
-        <span>{{ item.icon }}</span>
+        <component :is="item.icon" class="size-4" />
         <span>{{ item.label }}</span>
       </router-link>
 
-      <div class="h-px bg-gray-200 mx-4 my-3"></div>
-      <div class="px-4 pb-1 text-xs text-gray-400">文档管理</div>
+      <div class="h-px bg-border mx-4 my-3"></div>
+      <div class="px-4 pb-1 text-xs text-text-muted">文档管理</div>
 
       <router-link
         v-for="item in navItems.filter(n => n.group === 'files')"
@@ -51,16 +52,16 @@ function isActive(path: string) {
         :class="[
           'flex items-center gap-2 px-4 py-2.5 text-sm transition-colors',
           isActive(item.path)
-            ? 'active bg-purple-50 text-purple-700 font-medium border-l-[3px] border-purple-600'
-            : 'text-gray-600 hover:bg-gray-50 border-l-[3px] border-transparent'
+            ? 'active bg-primary-light text-primary font-medium border-l-[3px] border-primary'
+            : 'text-text-secondary hover:bg-background border-l-[3px] border-transparent'
         ]"
       >
-        <span>{{ item.icon }}</span>
+        <component :is="item.icon" class="size-4" />
         <span>{{ item.label }}</span>
       </router-link>
     </nav>
 
-    <div class="border-t border-gray-200 p-3">
+    <div class="border-t border-border p-3">
       <UserMenu />
     </div>
   </aside>
