@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { FileText } from 'lucide-vue-next'
 import { useAnalysisStore } from '../stores/analysisStore'
 
 const store = useAnalysisStore()
@@ -36,25 +37,25 @@ async function uploadFile(file: File) {
 <template>
   <div class="flex flex-col items-center justify-center min-h-[60vh] px-6">
     <div class="text-center max-w-lg">
-      <h1 class="text-xl font-semibold text-gray-800 mb-2">招标文件深度解析</h1>
-      <p class="text-gray-500 text-sm mb-8">上传招标文件，AI智能解析生成分析报告</p>
+      <h1 class="text-xl font-semibold text-text-primary mb-2">招标文件深度解析</h1>
+      <p class="text-text-muted text-sm mb-8">上传招标文件，AI智能解析生成分析报告</p>
 
       <div
         @dragover.prevent="dragging = true"
         @dragleave="dragging = false"
         @drop.prevent="onDrop"
         :class="[
-          'border-2 border-dashed rounded-xl p-12 transition-colors cursor-pointer bg-white',
-          dragging ? 'border-purple-500 bg-purple-50' : 'border-gray-300 hover:border-gray-400',
+          'border-2 border-dashed rounded-xl p-12 transition-colors cursor-pointer bg-surface',
+          dragging ? 'border-primary bg-primary-light' : 'border-border hover:border-text-muted',
         ]"
       >
-        <div class="text-4xl mb-3">📄</div>
-        <p class="text-gray-600 mb-1">拖拽文件到此处，或点击上传</p>
-        <p class="text-gray-400 text-xs mb-4">支持 .doc / .docx / .pdf 格式</p>
+        <FileText class="size-10 text-text-muted mb-3 mx-auto" />
+        <p class="text-text-secondary mb-1">拖拽文件到此处，或点击上传</p>
+        <p class="text-text-muted text-xs mb-4">支持 .doc / .docx / .pdf 格式</p>
         <label
           :class="[
             'inline-block px-6 py-2.5 rounded-lg text-white text-sm cursor-pointer transition-colors',
-            uploading ? 'bg-purple-400' : 'bg-purple-600 hover:bg-purple-700',
+            uploading ? 'bg-primary/70' : 'bg-primary hover:bg-primary-hover',
           ]"
         >
           {{ uploading ? '上传中...' : '选择文件' }}
@@ -62,7 +63,7 @@ async function uploadFile(file: File) {
         </label>
       </div>
 
-      <p v-if="store.error" class="text-red-500 text-sm mt-4">{{ store.error }}</p>
+      <p v-if="store.error" class="text-danger text-sm mt-4">{{ store.error }}</p>
     </div>
   </div>
 </template>

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { FileText } from 'lucide-vue-next'
+
 const props = defineProps<{
   filename: string
   progress: number
@@ -37,20 +39,21 @@ function stepStatus(stepKey: string) {
 
 <template>
   <div class="flex flex-col items-center justify-center min-h-[60vh] px-6">
-    <div class="w-full max-w-lg bg-white rounded-xl border border-gray-200 p-6">
+    <div class="w-full max-w-lg bg-surface rounded-xl border border-border p-6">
       <div class="flex items-center gap-2 mb-4">
-        <span class="text-sm text-gray-800">📄 {{ filename }}</span>
-        <span class="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700">{{ modeLabels[mode] }}</span>
+        <FileText class="size-4 text-text-primary" />
+        <span class="text-sm text-text-primary">{{ filename }}</span>
+        <span class="text-xs px-2 py-0.5 rounded bg-warning-light text-warning-foreground">{{ modeLabels[mode] }}</span>
       </div>
 
-      <div class="bg-gray-200 rounded-full h-2 mb-2">
+      <div class="bg-border rounded-full h-2 mb-2">
         <div
-          class="bg-gradient-to-r from-purple-600 to-purple-400 h-full rounded-full transition-all duration-300"
+          class="bg-gradient-to-r from-primary to-info h-full rounded-full transition-all duration-300"
           :style="{ width: `${Math.max(0, progress)}%` }"
         />
       </div>
 
-      <div class="flex justify-between text-xs text-gray-400 mb-4">
+      <div class="flex justify-between text-xs text-text-muted mb-4">
         <span>{{ detail || step }}</span>
         <span>{{ Math.max(0, progress) }}%</span>
       </div>
@@ -61,19 +64,19 @@ function stepStatus(stepKey: string) {
           :key="s.key"
           :class="[
             'text-xs px-3 py-1 rounded',
-            stepStatus(s.key) === 'done' ? 'bg-green-100 text-green-700' :
-            stepStatus(s.key) === 'active' ? 'bg-amber-100 text-amber-700' :
-            'bg-gray-100 text-gray-400'
+            stepStatus(s.key) === 'done' ? 'bg-success-light text-success-foreground' :
+            stepStatus(s.key) === 'active' ? 'bg-warning-light text-warning-foreground' :
+            'bg-background text-text-muted'
           ]"
         >
           {{ s.label }}
         </div>
       </div>
 
-      <div v-if="error" class="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
-        <p class="text-sm text-red-600">{{ error }}</p>
+      <div v-if="error" class="mt-4 p-3 bg-danger-light border border-danger/30 rounded-lg">
+        <p class="text-sm text-danger">{{ error }}</p>
         <button
-          class="mt-2 text-sm text-red-600 underline hover:text-red-800"
+          class="mt-2 text-sm text-danger underline hover:text-danger-foreground"
           @click="emit('retry')"
         >
           重试
