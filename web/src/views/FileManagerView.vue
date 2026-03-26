@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, computed } from 'vue'
+import { ref, watch, onMounted, computed, markRaw, type Component } from 'vue'
 import { useRouter } from 'vue-router'
 import { filesApi, type FileItem } from '../api/files'
+import { FolderOpen, BarChart3, Ruler, ClipboardList, FileText } from 'lucide-vue-next'
 import FileCard from '../components/FileCard.vue'
 
 const props = defineProps<{ fileType: string }>()
@@ -14,14 +15,14 @@ const pageSize = 20
 const searchQuery = ref('')
 const loading = ref(false)
 
-const typeConfig: Record<string, { title: string; icon: string }> = {
-  'bid-documents': { title: '招标文件', icon: '📁' },
-  reports: { title: '解析报告', icon: '📊' },
-  formats: { title: '文件格式', icon: '📐' },
-  checklists: { title: '资料清单', icon: '📋' },
+const typeConfig: Record<string, { title: string; icon: Component }> = {
+  'bid-documents': { title: '招标文件', icon: markRaw(FolderOpen) },
+  reports: { title: '解析报告', icon: markRaw(BarChart3) },
+  formats: { title: '文件格式', icon: markRaw(Ruler) },
+  checklists: { title: '资料清单', icon: markRaw(ClipboardList) },
 }
 
-const config = computed(() => typeConfig[props.fileType] || { title: props.fileType, icon: '📄' })
+const config = computed(() => typeConfig[props.fileType] || { title: props.fileType, icon: markRaw(FileText) })
 
 async function loadFiles() {
   loading.value = true
@@ -58,10 +59,13 @@ function handlePreview(id: string | number) {
 async function handleDownload(id: string | number) {
   try {
     const res = await filesApi.download(props.fileType, id)
+    const disposition = res.headers['content-disposition'] || ''
+    const match = disposition.match(/filename\*?=(?:UTF-8''|"?)([^";]+)/i)
+    const filename = match ? decodeURIComponent(match[1]) : 'download.docx'
     const url = URL.createObjectURL(res.data)
     const a = document.createElement('a')
     a.href = url
-    a.download = ''
+    a.download = filename
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
@@ -86,23 +90,23 @@ const totalPages = computed(() => Math.ceil(total.value / pageSize))
 
 <template>
   <div class="h-full flex flex-col">
-    <div class="px-6 py-4 bg-white border-b border-gray-200 flex items-center justify-between">
+    <div class="px-6 py-4 bg-surface border-b border-border flex items-center justify-between">
       <div>
-        <h1 class="text-lg font-semibold text-gray-800">{{ config.title }}</h1>
-        <p class="text-xs text-gray-400 mt-0.5">共 {{ total }} 个文件</p>
+        <h1 class="text-lg font-semibold text-text-primary">{{ config.title }}</h1>
+        <p class="text-xs text-text-muted mt-0.5">共 {{ total }} 个文件</p>
       </div>
       <input
         v-model="searchQuery"
         @input="onSearch"
-        class="px-3 py-1.5 border border-gray-300 rounded-lg text-sm w-52"
+        class="px-3 py-1.5 border border-border rounded-lg text-sm w-52"
         placeholder="搜索文件名..."
       />
     </div>
 
     <div class="flex-1 overflow-y-auto p-6">
-      <div v-if="loading" class="text-center text-gray-400 py-12">加载中...</div>
+      <div v-if="loading" class="text-center text-text-muted py-12">加载中...</div>
       <div v-else-if="items.length === 0" class="text-center py-16">
-        <div class="border border-dashed border-gray-300 rounded-lg p-8 text-gray-400 text-sm">
+        <div class="border border-dashed border-border rounded-lg p-8 text-text-muted text-sm">
           暂无文件，请在「招标解读」中上传并完成解析
         </div>
       </div>
@@ -120,22 +124,22 @@ const totalPages = computed(() => Math.ceil(total.value / pageSize))
       </div>
     </div>
 
-    <div v-if="totalPages > 1" class="px-6 py-3 border-t border-gray-200 bg-white flex items-center justify-between">
-      <span class="text-xs text-gray-400">显示 {{ (page - 1) * pageSize + 1 }}-{{ Math.min(page * pageSize, total) }} 共 {{ total }} 条</span>
+    <div v-if="totalPages > 1" class="px-6 py-3 border-t border-border bg-surface flex items-center justify-between">
+      <span class="text-xs text-text-muted">显示 {{ (page - 1) * pageSize + 1 }}-{{ Math.min(page * pageSize, total) }} 共 {{ total }} 条</span>
       <div class="flex gap-1">
         <button
-          class="px-2.5 py-1 text-xs border border-gray-300 rounded text-gray-500 disabled:opacity-50"
+          class="px-2.5 py-1 text-xs border border-border rounded text-text-muted disabled:opacity-50"
           :disabled="page <= 1"
           @click="page--"
         >上一页</button>
         <button
           v-for="p in totalPages"
           :key="p"
-          :class="['px-2.5 py-1 text-xs rounded', p === page ? 'bg-purple-600 text-white' : 'border border-gray-300 text-gray-500']"
+          :class="['px-2.5 py-1 text-xs rounded', p === page ? 'bg-primary text-primary-foreground' : 'border border-border text-text-muted']"
           @click="page = p"
         >{{ p }}</button>
         <button
-          class="px-2.5 py-1 text-xs border border-gray-300 rounded text-gray-500 disabled:opacity-50"
+          class="px-2.5 py-1 text-xs border border-border rounded text-text-muted disabled:opacity-50"
           :disabled="page >= totalPages"
           @click="page++"
         >下一页</button>

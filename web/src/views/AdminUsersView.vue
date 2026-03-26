@@ -31,11 +31,11 @@ onMounted(loadUsers)
   <div class="p-6">
     <div class="flex items-center justify-between mb-6">
       <h1 class="text-xl font-bold">用户管理</h1>
-      <button @click="showCreate = true" class="px-4 py-2 bg-blue-600 text-white rounded-md text-sm hover:bg-blue-700">创建用户</button>
+      <button @click="showCreate = true" class="px-4 py-2 bg-primary text-white rounded-md text-sm hover:bg-primary-hover">创建用户</button>
     </div>
 
     <!-- 创建表单 -->
-    <div v-if="showCreate" class="bg-white p-4 rounded-lg shadow mb-6 space-y-3">
+    <div v-if="showCreate" class="bg-surface p-4 rounded-lg shadow mb-6 space-y-3">
       <input v-model="form.username" placeholder="用户名" class="w-full border rounded px-3 py-2 text-sm" />
       <input v-model="form.password" type="password" placeholder="密码" class="w-full border rounded px-3 py-2 text-sm" />
       <input v-model="form.display_name" placeholder="显示名称" class="w-full border rounded px-3 py-2 text-sm" />
@@ -44,15 +44,15 @@ onMounted(loadUsers)
         <option value="admin">管理员</option>
       </select>
       <div class="flex gap-2">
-        <button @click="createUser" class="px-4 py-2 bg-green-600 text-white rounded text-sm">创建</button>
+        <button @click="createUser" class="px-4 py-2 bg-success text-white rounded text-sm">创建</button>
         <button @click="showCreate = false" class="px-4 py-2 border rounded text-sm">取消</button>
       </div>
     </div>
 
     <!-- 用户列表 -->
-    <div class="bg-white rounded-lg shadow overflow-hidden">
+    <div class="bg-surface rounded-lg shadow overflow-hidden">
       <table class="w-full text-sm">
-        <thead class="bg-gray-50"><tr>
+        <thead class="bg-background"><tr>
           <th class="px-4 py-3 text-left">用户名</th>
           <th class="px-4 py-3 text-left">显示名</th>
           <th class="px-4 py-3 text-left">角色</th>
@@ -64,7 +64,7 @@ onMounted(loadUsers)
             <td class="px-4 py-3">{{ u.display_name }}</td>
             <td class="px-4 py-3">{{ u.role }}</td>
             <td class="px-4 py-3">
-              <button v-if="u.role !== 'admin'" @click="deleteUser(u.id)" class="text-red-500 hover:underline text-sm">删除</button>
+              <button v-if="u.role !== 'admin'" @click="deleteUser(u.id)" class="text-danger hover:underline text-sm">删除</button>
             </td>
           </tr>
         </tbody>
