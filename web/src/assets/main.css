@@ -1,1 +1,46 @@
 @import "tailwindcss";
+
+@theme {
+  /* 主色 - 蓝色系 */
+  --color-primary: oklch(45% 0.15 250);
+  --color-primary-hover: oklch(40% 0.17 250);
+  --color-primary-light: oklch(95% 0.03 250);
+  --color-primary-foreground: oklch(98% 0 0);
+
+  /* 中性色 */
+  --color-background: oklch(98.5% 0.005 264);
+  --color-surface: oklch(100% 0 0);
+  --color-border: oklch(91% 0.01 264);
+  --color-text-primary: oklch(20% 0.02 264);
+  --color-text-secondary: oklch(45% 0.02 264);
+  --color-text-muted: oklch(60% 0.015 264);
+
+  /* 语义色 */
+  --color-success: oklch(55% 0.17 145);
+  --color-success-light: oklch(95% 0.03 145);
+  --color-success-foreground: oklch(30% 0.1 145);
+  --color-warning: oklch(70% 0.15 75);
+  --color-warning-light: oklch(95% 0.04 75);
+  --color-warning-foreground: oklch(35% 0.1 75);
+  --color-danger: oklch(55% 0.2 27);
+  --color-danger-light: oklch(95% 0.03 27);
+  --color-danger-foreground: oklch(30% 0.12 27);
+
+  /* 交互/信息色 */
+  --color-info: oklch(55% 0.18 250);
+  --color-info-light: oklch(96% 0.02 250);
+  --color-info-foreground: oklch(30% 0.12 250);
+
+  /* 高亮色 */
+  --color-highlight: oklch(90% 0.08 85);
+  --color-highlight-foreground: oklch(35% 0.1 75);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-text-primary antialiased;
+  }
+}
