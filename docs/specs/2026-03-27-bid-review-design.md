@@ -48,6 +48,7 @@
 - **优先级分级审查**：废标条款逐条严格审查，其他条款按重要性批量审查
 - **增量式设计**：新增独立的 ReviewTask 模型和路由，不修改现有 Task 表和 API
 - **自包含存储**：审查结果文件直接由 ReviewTask 管理，不依赖 GeneratedFile 表
+- **上传限制调整**：投标文件可能达 500MB，需将 `MAX_UPLOAD_SIZE` 从 50MB 提升至 500MB（`server/app/config.py`），同时 nginx 的 `client_max_body_size` 也需同步调整
 
 ---
 
