@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     DASHSCOPE_API_KEY: str = ""
     DATA_DIR: str = "/data"
-    MAX_UPLOAD_SIZE: int = 50 * 1024 * 1024  # 50MB
+    MAX_UPLOAD_SIZE: int = 500 * 1024 * 1024  # 500MB
     ALLOWED_EXTENSIONS: list[str] = [".doc", ".docx", ".pdf"]
 
 
