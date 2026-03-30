@@ -2,7 +2,7 @@
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.app.database import get_db
@@ -23,7 +23,11 @@ async def create_review_endpoint(
     db: AsyncSession = Depends(get_db),
 ):
     review = await create_review(db, tender_file, bid_task_id, user.id)
-    # TODO: dispatch run_review Celery task here (Task 9)
+    # Dispatch Celery task
+    from server.app.tasks.review_task import run_review
+    celery_result = run_review.delay(str(review.id))
+    review.celery_task_id = celery_result.id
+    await db.commit()
     return {"id": str(review.id), "status": review.status, "version": review.version}
 
 
@@ -91,6 +95,54 @@ async def delete_review_endpoint(
     db: AsyncSession = Depends(get_db),
 ):
     await delete_review(db, review_id, user.id)
+
+
+@router.get("/{review_id}/progress")
+async def review_progress(
+    review_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """SSE endpoint for review task progress."""
+    review = await get_review(db, review_id, user.id)
+    if not review:
+        raise HTTPException(status_code=404, detail="审查任务不存在")
+
+    celery_task_id = review.celery_task_id
+
+    async def event_generator():
+        nonlocal celery_task_id
+        from celery.result import AsyncResult
+        import asyncio
+        import json
+
+        while True:
+            if not celery_task_id:
+                yield f"data: {json.dumps({'progress': 0, 'step': 'pending'})}\n\n"
+                await asyncio.sleep(2)
+                await db.refresh(review)
+                celery_task_id = review.celery_task_id
+                continue
+
+            result = AsyncResult(celery_task_id)
+            if result.state == "PROGRESS":
+                meta = result.info or {}
+                yield f"data: {json.dumps(meta)}\n\n"
+            elif result.state == "SUCCESS":
+                await db.refresh(review)
+                if review.status == "completed":
+                    yield f"data: {json.dumps({'progress': 100, 'step': 'completed'})}\n\n"
+                    return
+                elif review.status == "failed":
+                    yield f"data: {json.dumps({'progress': 0, 'step': 'failed', 'error': review.error_message})}\n\n"
+                    return
+            elif result.state == "FAILURE":
+                yield f"data: {json.dumps({'progress': 0, 'step': 'failed', 'error': str(result.info)})}\n\n"
+                return
+
+            await asyncio.sleep(1)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.get("/{review_id}/download")
