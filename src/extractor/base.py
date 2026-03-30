@@ -27,7 +27,7 @@ def estimate_tokens(text: str) -> int:
 
 # ========== JSON 解析 ==========
 
-def parse_llm_json(raw: str) -> dict | None:
+def parse_llm_json(raw: str) -> dict | list | None:
     """从 LLM 输出中提取 JSON。处理 markdown 代码块包裹、尾部多余文本。"""
     if not raw or not raw.strip():
         return None
@@ -51,6 +51,15 @@ def parse_llm_json(raw: str) -> dict | None:
     if first_brace != -1 and last_brace > first_brace:
         try:
             return json.loads(text[first_brace : last_brace + 1])
+        except json.JSONDecodeError:
+            pass
+
+    # 尝试找到第一个 [ 到最后一个 ] 的范围（支持 JSON 数组）
+    first_bracket = text.find("[")
+    last_bracket = text.rfind("]")
+    if first_bracket != -1 and last_bracket > first_bracket:
+        try:
+            return json.loads(text[first_bracket : last_bracket + 1])
         except json.JSONDecodeError:
             pass
 
@@ -93,23 +102,39 @@ def _raw_api_call(messages: list[dict], settings: dict) -> str:
     return response.choices[0].message.content
 
 
-def call_qwen(messages: list[dict], settings: dict | None = None) -> dict | None:
-    """调用 DashScope API 并解析返回的 JSON。含重试和限流处理。"""
+def call_qwen(messages: list[dict], settings: dict | None = None) -> dict | list | None:
+    """调用 DashScope API 并解析返回的 JSON。
+
+    当 LLM 返回非 JSON 时，将其回复追加到对话中，要求转为 JSON 再返回。
+    若仍失败则重新发起完整请求。
+    """
     if settings is None:
         settings = load_settings()
 
     max_retries = settings["api"].get("retry", 3)
+    conv = list(messages)  # 工作副本，可追加纠正消息
+
     for attempt in range(max_retries):
         try:
-            raw = _raw_api_call(messages, settings)
+            raw = _raw_api_call(conv, settings)
             logger.debug("LLM raw response (first 200 chars): %s", raw[:200] if raw else "")
             result = parse_llm_json(raw)
             if result is not None:
                 return result
-            logger.warning("Attempt %d: LLM returned non-JSON response", attempt + 1)
+
+            # 非 JSON：追加 LLM 回复 + 纠正指令，让同一轮对话修正
+            logger.warning("Attempt %d: LLM returned non-JSON response, asking to convert", attempt + 1)
+            conv.append({"role": "assistant", "content": raw})
+            conv.append({
+                "role": "user",
+                "content": "你的回复不是合法的 JSON 格式。请将上面的内容严格转换为 JSON 格式返回，不要包含任何多余的解释文字。",
+            })
+
         except Exception as e:
             error_msg = str(e)
             logger.warning("Attempt %d failed: %s", attempt + 1, error_msg)
+            # API 异常时重置对话，避免带着脏上下文重试
+            conv = list(messages)
             if attempt < max_retries - 1:
                 wait = 2 ** attempt
                 logger.info("Retrying in %ds...", wait)
