@@ -4,7 +4,7 @@
 
 **Goal:** 新增"标书审查"功能，用户上传投标文件后系统自动与已解析的招标要求逐条核对，生成带 Word 原生批注的审查报告。
 
-**Architecture:** 新增 `ReviewTask` 数据模型独立于现有 `Task` 表。审查核心逻辑放在 `src/reviewer/` 目录下（TOC 检测、条款提取、LLM 核对、docx 批注生成）。后端通过新的 `/api/reviews` 路由和 `run_review` Celery 任务驱动。前端新增 `BidReviewView`（三阶段状态机）和 `ReviewResultsView`。
+**Architecture:** 新增 `ReviewTask` 数据模型独立于现有 `Task` 表。审查核心逻辑放在 `src/reviewer/` 目录下（信息脱敏、图片提取、TOC 检测、条款提取、LLM 核对、docx 批注生成）。上传投标文件后先执行 PII 脱敏（姓名、电话、身份证等）并提取文档中的图片供审阅。后端通过新的 `/api/reviews` 路由和 `run_review` Celery 任务驱动。前端新增 `BidReviewView`（三阶段状态机）和 `ReviewResultsView`。
 
 **Tech Stack:** Python 3.11, FastAPI, Celery, SQLAlchemy (asyncpg), python-docx + lxml, Vue 3 + TypeScript + Pinia + Tailwind CSS v4, Vitest
 
@@ -1116,6 +1116,623 @@ git commit -m "feat(reviewer): add clause extractor from extracted_data"
 
 ---
 
+### Task 6b: 信息脱敏模块
+
+**Files:**
+- Create: `src/reviewer/desensitizer.py`
+- Test: `src/reviewer/tests/test_desensitizer.py`
+
+- [ ] **Step 1: 编写脱敏器测试**
+
+```python
+# src/reviewer/tests/test_desensitizer.py
+"""Tests for PII desensitization in tender documents."""
+from src.models import Paragraph
+from src.reviewer.desensitizer import desensitize_paragraphs
+
+
+def _make_paras(texts: list[str]) -> list[Paragraph]:
+    return [Paragraph(index=i, text=t, style=None) for i, t in enumerate(texts)]
+
+
+def test_phone_number_masked():
+    """Mobile phone numbers are replaced with numbered placeholders."""
+    paras = _make_paras(["联系人电话：13812345678，备用：13987654321"])
+    result, mapping = desensitize_paragraphs(paras)
+    assert "[电话_1]" in result[0].text
+    assert "[电话_2]" in result[0].text
+    assert "13812345678" not in result[0].text
+    assert mapping["[电话_1]"] == "13812345678"
+    assert mapping["[电话_2]"] == "13987654321"
+
+
+def test_id_card_masked():
+    """18-digit ID card numbers with valid dates are masked."""
+    paras = _make_paras(["身份证号：110101199003074518"])
+    result, mapping = desensitize_paragraphs(paras)
+    assert "[身份证_1]" in result[0].text
+    assert "110101199003074518" not in result[0].text
+
+
+def test_id_card_with_x_suffix():
+    """ID cards ending with X are masked."""
+    paras = _make_paras(["身份证：32010619880215371X"])
+    result, mapping = desensitize_paragraphs(paras)
+    assert "[身份证_1]" in result[0].text
+    assert "32010619880215371X" not in result[0].text
+
+
+def test_id_card_invalid_date_not_masked():
+    """18-digit numbers with invalid dates are NOT matched as ID cards."""
+    # Month 13 is invalid
+    paras = _make_paras(["编号：110101199013074518"])
+    result, _ = desensitize_paragraphs(paras)
+    # Should not be masked as ID card (invalid month 13)
+    assert "[身份证_1]" not in result[0].text
+
+
+def test_email_masked():
+    """Email addresses are masked."""
+    paras = _make_paras(["请发送至 zhangsan@example.com 或 lisi@company.cn"])
+    result, mapping = desensitize_paragraphs(paras)
+    assert "[邮箱_1]" in result[0].text
+    assert "[邮箱_2]" in result[0].text
+    assert "zhangsan@example.com" not in result[0].text
+
+
+def test_bank_account_masked():
+    """16-19 digit bank account numbers are masked."""
+    paras = _make_paras(["开户账号：6222021234567890123"])
+    result, mapping = desensitize_paragraphs(paras)
+    assert "[银行账号_1]" in result[0].text
+    assert "6222021234567890123" not in result[0].text
+
+
+def test_name_in_context_masked():
+    """Names following context keywords (联系人、项目经理 etc.) are masked."""
+    paras = _make_paras([
+        "项目经理：张三",
+        "联系人：李四  电话：13800001111",
+        "法定代表人：王五",
+    ])
+    result, mapping = desensitize_paragraphs(paras)
+    assert "张三" not in result[0].text
+    assert "[姓名_1]" in result[0].text
+    assert "李四" not in result[1].text
+    assert "[姓名_2]" in result[1].text
+    assert "王五" not in result[2].text
+
+
+def test_table_data_desensitized():
+    """PII in table cells is also desensitized."""
+    para = Paragraph(
+        index=0, text="联系方式", style=None,
+        is_table=True,
+        table_data=[
+            ["联系人", "张三"],
+            ["电话", "13812345678"],
+            ["邮箱", "zs@test.com"],
+        ],
+    )
+    result, mapping = desensitize_paragraphs([para])
+    flat = str(result[0].table_data)
+    assert "张三" not in flat
+    assert "13812345678" not in flat
+    assert "zs@test.com" not in flat
+
+
+def test_table_keyword_as_substring():
+    """Cross-cell name detection works when keyword is a substring of cell text."""
+    para = Paragraph(
+        index=0, text="人员信息", style=None,
+        is_table=True,
+        table_data=[
+            ["项目联系人", "赵六"],
+            ["职务", "经理"],
+        ],
+    )
+    result, mapping = desensitize_paragraphs([para])
+    flat = str(result[0].table_data)
+    assert "赵六" not in flat
+    assert "[姓名_1]" in flat
+
+
+def test_no_pii_unchanged():
+    """Text without PII is not modified."""
+    paras = _make_paras(["投标文件须双面打印并装订成册", "技术方案不少于30页"])
+    result, mapping = desensitize_paragraphs(paras)
+    assert result[0].text == "投标文件须双面打印并装订成册"
+    assert result[1].text == "技术方案不少于30页"
+    assert len(mapping) == 0
+
+
+def test_same_value_gets_same_placeholder():
+    """Identical PII values reuse the same placeholder."""
+    paras = _make_paras(["电话13812345678", "再次确认13812345678"])
+    result, mapping = desensitize_paragraphs(paras)
+    assert result[0].text.count("[电话_1]") == 1
+    assert result[1].text.count("[电话_1]") == 1
+    assert len([k for k in mapping if k.startswith("[电话_")]) == 1
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `python -m pytest src/reviewer/tests/test_desensitizer.py -v`
+Expected: FAIL — `ModuleNotFoundError`
+
+- [ ] **Step 3: 实现 desensitizer.py**
+
+```python
+# src/reviewer/desensitizer.py
+"""PII desensitization for tender documents.
+
+Detects and masks personal information (phone numbers, ID cards, emails,
+bank accounts, names in context) before LLM review to protect privacy.
+"""
+import re
+from dataclasses import replace
+from src.models import Paragraph
+
+
+# ── Regex patterns ──────────────────────────────────────────────────
+_PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+# ID card: region(6) + birth(8: YYYYMMDD) + seq(3) + check(1)
+_ID_CARD_RE = re.compile(r"(?<!\d)[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx](?!\d)")
+_EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+_BANK_RE = re.compile(r"(?<!\d)\d{16,19}(?!\d)")
+
+# Context-based name detection: keyword + delimiter + 2-4 Chinese chars
+_NAME_CONTEXT_RE = re.compile(
+    r"(?:联系人|项目经理|项目负责人|法定代表人|授权代表|负责人|经办人|签字人|投标人代表)"
+    r"[：:\s]*"
+    r"([\u4e00-\u9fff]{2,4})"
+)
+
+# Ordered by specificity: ID card before bank account (18 digits vs 16-19)
+_PATTERNS = [
+    ("身份证", _ID_CARD_RE),
+    ("电话", _PHONE_RE),
+    ("邮箱", _EMAIL_RE),
+    ("银行账号", _BANK_RE),
+]
+
+
+class _PlaceholderRegistry:
+    """Tracks PII values → placeholders, deduplicating identical values."""
+
+    def __init__(self):
+        self._value_to_placeholder: dict[str, str] = {}
+        self._counters: dict[str, int] = {}
+        self.mapping: dict[str, str] = {}  # placeholder → original
+
+    def get_placeholder(self, category: str, value: str) -> str:
+        if value in self._value_to_placeholder:
+            return self._value_to_placeholder[value]
+        count = self._counters.get(category, 0) + 1
+        self._counters[category] = count
+        placeholder = f"[{category}_{count}]"
+        self._value_to_placeholder[value] = placeholder
+        self.mapping[placeholder] = value
+        return placeholder
+
+
+def _desensitize_text(text: str, registry: _PlaceholderRegistry) -> str:
+    """Apply all PII patterns to a single text string."""
+    # 1. Context-based names first (most specific)
+    for m in list(_NAME_CONTEXT_RE.finditer(text)):
+        name = m.group(1)
+        placeholder = registry.get_placeholder("姓名", name)
+        text = text.replace(name, placeholder, 1)
+
+    # 2. Regex-based patterns
+    for category, pattern in _PATTERNS:
+        for m in list(pattern.finditer(text)):
+            value = m.group(0)
+            # Skip if value was already replaced by a prior pattern
+            if value not in text:
+                continue
+            placeholder = registry.get_placeholder(category, value)
+            text = text.replace(value, placeholder, 1)
+
+    return text
+
+
+# Keywords that indicate the *next* cell in a table row contains a name
+_NAME_KEYWORDS = {"联系人", "项目经理", "项目负责人", "法定代表人", "授权代表",
+                  "负责人", "经办人", "签字人", "投标人代表"}
+
+# Standalone Chinese name pattern (2-4 chars, used only for table cells with keyword context)
+_STANDALONE_NAME_RE = re.compile(r"^[\u4e00-\u9fff]{2,4}$")
+
+
+def _desensitize_table_row(row: list[str], registry: _PlaceholderRegistry) -> list[str]:
+    """Desensitize a table row with cross-cell name detection.
+
+    In tables, keywords like "联系人" and the name "张三" are often in adjacent cells.
+    First pass: detect keyword cells and mask the adjacent name cell.
+    Second pass: apply standard regex patterns to each cell.
+    """
+    new_row = list(row)
+
+    # Cross-cell name detection: if cell[i] contains a keyword, check cell[i+1] for a name
+    for i in range(len(new_row) - 1):
+        cell_text = new_row[i].strip()
+        if any(kw in cell_text for kw in _NAME_KEYWORDS):
+            next_cell = new_row[i + 1].strip()
+            if _STANDALONE_NAME_RE.match(next_cell):
+                placeholder = registry.get_placeholder("姓名", next_cell)
+                new_row[i + 1] = new_row[i + 1].replace(next_cell, placeholder, 1)
+
+    # Standard desensitization on each cell
+    new_row = [_desensitize_text(cell, registry) for cell in new_row]
+    return new_row
+
+
+def desensitize_paragraphs(
+    paragraphs: list[Paragraph],
+) -> tuple[list[Paragraph], dict[str, str]]:
+    """Desensitize PII in all paragraphs.
+
+    Returns:
+        - New list of Paragraph objects with PII replaced by placeholders
+        - Mapping dict: {placeholder: original_value}
+    """
+    registry = _PlaceholderRegistry()
+    result = []
+
+    for para in paragraphs:
+        new_text = _desensitize_text(para.text, registry)
+
+        new_table_data = None
+        if para.table_data:
+            new_table_data = [
+                _desensitize_table_row(row, registry)
+                for row in para.table_data
+            ]
+
+        result.append(replace(para, text=new_text, table_data=new_table_data))
+
+    return result, registry.mapping
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `python -m pytest src/reviewer/tests/test_desensitizer.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/reviewer/desensitizer.py src/reviewer/tests/test_desensitizer.py
+git commit -m "feat(reviewer): add PII desensitizer for tender documents"
+```
+
+---
+
+### Task 6c: 图片提取模块
+
+**Files:**
+- Create: `src/reviewer/image_extractor.py`
+- Test: `src/reviewer/tests/test_image_extractor.py`
+
+- [ ] **Step 1: 编写图片提取测试**
+
+```python
+# src/reviewer/tests/test_image_extractor.py
+"""Tests for image extraction from docx/PDF files."""
+import os
+import tempfile
+import pytest
+from docx import Document
+from docx.shared import Inches
+
+from src.reviewer.image_extractor import extract_images
+
+
+@pytest.fixture
+def docx_with_image(tmp_path):
+    """Create a docx file with an embedded image for testing."""
+    doc = Document()
+    doc.add_paragraph("第一章 投标函")
+    # Create a minimal 1x1 PNG for testing
+    import struct, zlib
+    def make_png():
+        """Generate a minimal 1x1 red PNG."""
+        raw = b"\x00\xff\x00\x00"  # filter + RGB
+        compressed = zlib.compress(raw)
+        def chunk(ctype, data):
+            c = ctype + data
+            return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", compressed)
+            + chunk(b"IEND", b"")
+        )
+    png_path = tmp_path / "test.png"
+    png_path.write_bytes(make_png())
+    doc.add_picture(str(png_path), width=Inches(2))
+    doc.add_paragraph("资质证书如上图所示")
+    doc.add_paragraph("第二章 技术方案")
+    docx_path = tmp_path / "test_with_image.docx"
+    doc.save(str(docx_path))
+    return str(docx_path)
+
+
+def test_extract_images_from_docx(docx_with_image, tmp_path):
+    """Images are extracted from docx and saved to output dir."""
+    output_dir = str(tmp_path / "images")
+    images = extract_images(docx_with_image, output_dir)
+    assert len(images) >= 1
+    assert images[0]["filename"].endswith(".png") or images[0]["filename"].endswith(".jpeg")
+    assert os.path.exists(images[0]["path"])
+    # Image-only paragraph is deferred to next text paragraph "资质证书如上图所示"
+    # which is index 1 (after "第一章 投标函" at index 0, skipping the empty image paragraph)
+    assert images[0]["near_para_index"] == 1
+
+
+def test_extract_images_no_images(tmp_path):
+    """Docx without images returns empty list."""
+    doc = Document()
+    doc.add_paragraph("纯文本段落")
+    docx_path = str(tmp_path / "no_image.docx")
+    doc.save(docx_path)
+    output_dir = str(tmp_path / "images")
+    images = extract_images(docx_path, output_dir)
+    assert images == []
+
+
+def test_extract_images_from_pdf(tmp_path):
+    """PDF image extraction returns a list (may be empty without pymupdf)."""
+    # This is a graceful-degradation test: if pymupdf is not installed,
+    # the function should return [] without raising.
+    pdf_path = str(tmp_path / "test.pdf")
+    # Create a minimal PDF (no images)
+    with open(pdf_path, "wb") as f:
+        f.write(b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+                b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+                b"3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R>>endobj\n"
+                b"xref\n0 4\n0000000000 65535 f \n"
+                b"0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n"
+                b"trailer<</Size 4/Root 1 0 R>>\nstartxref\n190\n%%EOF")
+    output_dir = str(tmp_path / "images")
+    images = extract_images(pdf_path, output_dir)
+    assert isinstance(images, list)
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `python -m pytest src/reviewer/tests/test_image_extractor.py -v`
+Expected: FAIL — `ModuleNotFoundError`
+
+- [ ] **Step 3: 实现 image_extractor.py**
+
+```python
+# src/reviewer/image_extractor.py
+"""Extract embedded images from docx and PDF files.
+
+Returns metadata about each image: filename, saved path, and approximate
+paragraph position for cross-referencing in the preview UI.
+"""
+import os
+import logging
+from zipfile import ZipFile
+
+logger = logging.getLogger(__name__)
+
+_MIME_TYPES = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".bmp": "image/bmp",
+    ".tiff": "image/tiff", ".tif": "image/tiff",
+}
+
+
+def extract_images(file_path: str, output_dir: str) -> list[dict]:
+    """Extract images from a document file.
+
+    Args:
+        file_path: Path to the docx or PDF file.
+        output_dir: Directory to save extracted images.
+
+    Returns:
+        List of dicts: [{filename, path, near_para_index, content_type}]
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".docx":
+        return _extract_from_docx(file_path, output_dir)
+    elif ext == ".pdf":
+        return _extract_from_pdf(file_path, output_dir)
+    return []
+
+
+def _extract_from_docx(file_path: str, output_dir: str) -> list[dict]:
+    """Extract images from docx by reading the media/ directory in the zip.
+
+    Also parses document.xml.rels to map images to paragraph positions.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    images = []
+
+    try:
+        with ZipFile(file_path, "r") as zf:
+            media_files = [n for n in zf.namelist() if n.startswith("word/media/")]
+            if not media_files:
+                return []
+
+            # Build rId → media filename mapping from rels
+            rid_to_media = {}
+            rels_path = "word/_rels/document.xml.rels"
+            if rels_path in zf.namelist():
+                from lxml import etree
+                rels_xml = etree.fromstring(zf.read(rels_path))
+                for rel in rels_xml:
+                    target = rel.get("Target", "")
+                    rid = rel.get("Id", "")
+                    if "media/" in target:
+                        rid_to_media[rid] = target.split("/")[-1]
+
+            # Find paragraph positions of images via document.xml
+            para_image_map = {}  # media_filename → para_index
+            if "word/document.xml" in zf.namelist():
+                from lxml import etree
+                doc_xml = etree.fromstring(zf.read("word/document.xml"))
+                ns = {
+                    "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                    "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+                    "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+                    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+                    "pic": "http://schemas.openxmlformats.org/drawingml/2006/picture",
+                }
+                # Iterate only body-level children (matching parse_docx behavior)
+                # parse_docx skips empty paragraphs (no run text) — they get no index.
+                # For image-only paragraphs (no text but has image), we associate the
+                # image with the NEXT text paragraph's index (para_idx), so the image
+                # displays next to the first paragraph after it.
+                body = doc_xml.find(f"{{{ns['w']}}}body")
+                w_p = f"{{{ns['w']}}}p"
+                w_tbl = f"{{{ns['w']}}}tbl"
+                w_r = f"{{{ns['w']}}}r"
+                w_t = f"{{{ns['w']}}}t"
+                para_idx = 0
+                pending_images = []  # images from text-empty paragraphs
+                if body is not None:
+                    for child in body:
+                        if child.tag == w_p:
+                            # Check text content (matching parse_docx lines 28-34)
+                            runs_text = []
+                            for r in child.findall(w_r):
+                                t = r.find(w_t)
+                                if t is not None and t.text:
+                                    runs_text.append(t.text)
+                            has_text = bool("".join(runs_text).strip())
+
+                            # Check if this paragraph contains an image
+                            blip_elems = child.findall(".//a:blip", ns)
+                            found_images = []
+                            for blip in blip_elems:
+                                embed = blip.get(f"{{{ns['r']}}}embed")
+                                if embed and embed in rid_to_media:
+                                    found_images.append(rid_to_media[embed])
+
+                            if has_text:
+                                # Flush pending images from previous empty paragraphs
+                                for media_fn in pending_images:
+                                    para_image_map[media_fn] = para_idx
+                                pending_images.clear()
+                                # Assign current paragraph's images
+                                for media_fn in found_images:
+                                    para_image_map[media_fn] = para_idx
+                                para_idx += 1
+                            else:
+                                # Image-only paragraph: defer to next text paragraph
+                                pending_images.extend(found_images)
+                        elif child.tag == w_tbl:
+                            # Flush pending images into this table's index
+                            for media_fn in pending_images:
+                                para_image_map[media_fn] = para_idx
+                            pending_images.clear()
+                            # Table images
+                            blip_elems = child.findall(".//a:blip", ns)
+                            for blip in blip_elems:
+                                embed = blip.get(f"{{{ns['r']}}}embed")
+                                if embed and embed in rid_to_media:
+                                    para_image_map[rid_to_media[embed]] = para_idx
+                            para_idx += 1
+                    # Handle trailing pending images (assign to last index)
+                    if pending_images and para_idx > 0:
+                        for media_fn in pending_images:
+                            para_image_map[media_fn] = para_idx - 1
+
+            # Extract each media file
+            for media_path in media_files:
+                filename = os.path.basename(media_path)
+                # Skip non-image files (e.g., .emf, .wmf are usually decorative)
+                ext_lower = os.path.splitext(filename)[1].lower()
+                if ext_lower not in _MIME_TYPES:
+                    continue
+
+                out_path = os.path.join(output_dir, filename)
+                with open(out_path, "wb") as f:
+                    f.write(zf.read(media_path))
+
+                content_type = _MIME_TYPES[ext_lower]
+
+                images.append({
+                    "filename": filename,
+                    "path": out_path,
+                    "near_para_index": para_image_map.get(filename),
+                    "content_type": content_type,
+                })
+
+    except Exception as e:
+        logger.warning("Failed to extract images from docx: %s", e)
+
+    return images
+
+
+def _extract_from_pdf(file_path: str, output_dir: str) -> list[dict]:
+    """Extract images from PDF using pymupdf (fitz) if available."""
+    try:
+        import fitz  # pymupdf
+    except ImportError:
+        logger.info("pymupdf not installed, skipping PDF image extraction")
+        return []
+
+    os.makedirs(output_dir, exist_ok=True)
+    images = []
+
+    try:
+        doc = fitz.open(file_path)
+        img_index = 0
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            image_list = page.get_images(full=True)
+            for img_info in image_list:
+                xref = img_info[0]
+                try:
+                    base_image = doc.extract_image(xref)
+                    if not base_image:
+                        continue
+                    ext = base_image["ext"]
+                    dot_ext = f".{ext}"
+                    if dot_ext not in _MIME_TYPES:
+                        continue
+                    filename = f"page{page_num+1}_img{img_index}.{ext}"
+                    out_path = os.path.join(output_dir, filename)
+                    with open(out_path, "wb") as f:
+                        f.write(base_image["image"])
+                    content_type = _MIME_TYPES[dot_ext]
+                    images.append({
+                        "filename": filename,
+                        "path": out_path,
+                        "near_para_index": None,  # PDF images lack precise paragraph mapping
+                        "content_type": content_type,
+                        "page": page_num + 1,
+                    })
+                    img_index += 1
+                except Exception:
+                    continue
+        doc.close()
+    except Exception as e:
+        logger.warning("Failed to extract images from PDF: %s", e)
+
+    return images
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `python -m pytest src/reviewer/tests/test_image_extractor.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/reviewer/image_extractor.py src/reviewer/tests/test_image_extractor.py
+git commit -m "feat(reviewer): add image extraction from docx/PDF for review"
+```
+
+---
+
 ## Chunk 3: LLM 审查核对模块
 
 ### Task 7: 条款-章节映射器 + LLM 核对器
@@ -1180,6 +1797,13 @@ if first_bracket != -1 and last_bracket > first_bracket:
 # config/prompts/review_clause.txt
 你是招标文件审查专家。请审查投标文件是否符合以下招标要求。
 
+## 隐私保护规则（必须遵守）
+投标文件中的个人隐私数据已被脱敏处理，以 [姓名_N]、[电话_N]、[身份证_N]、[邮箱_N]、[银行账号_N] 等占位符表示。
+- 你的回复中**禁止**填充、还原、猜测任何脱敏占位符的真实内容
+- 引用原文时保持占位符原样输出
+- 如果条款审查涉及人员资质或联系方式，只需判断"是否提供了相关信息"，无需关注具体内容
+- 包含图片的位置以 [图片: filename] 标记，存在该标记即视为已提供扫描件/证书
+
 ## 项目背景
 {project_context}
 
@@ -1209,6 +1833,13 @@ if first_bracket != -1 and last_bracket > first_bracket:
 ```text
 # config/prompts/review_batch.txt
 你是招标文件审查专家。请批量审查投标文件是否符合以下多条招标要求。
+
+## 隐私保护规则（必须遵守）
+投标文件中的个人隐私数据已被脱敏处理，以 [姓名_N]、[电话_N]、[身份证_N]、[邮箱_N]、[银行账号_N] 等占位符表示。
+- 你的回复中**禁止**填充、还原、猜测任何脱敏占位符的真实内容
+- 引用原文时保持占位符原样输出
+- 如果条款审查涉及人员资质或联系方式，只需判断"是否提供了相关信息"，无需关注具体内容
+- 包含图片的位置以 [图片: filename] 标记，存在该标记即视为已提供扫描件/证书
 
 ## 项目背景
 {project_context}
@@ -1940,10 +2571,12 @@ _sync_engine = create_engine(_sync_db_url)
 
 @celery_app.task(bind=True, name="run_review")
 def run_review(self, review_id: str):
-    """Main review pipeline: index → map → review → generate docx."""
+    """Main review pipeline: parse → desensitize → extract images → index → map → review → generate docx."""
     from server.app.models.review_task import ReviewTask
     from server.app.models.task import Task
     from src.parser.unified import parse_document
+    from src.reviewer.desensitizer import desensitize_paragraphs
+    from src.reviewer.image_extractor import extract_images
     from src.reviewer.toc_detector import detect_toc
     from src.reviewer.tender_indexer import build_index_from_toc
     from src.reviewer.clause_extractor import extract_review_clauses, extract_project_context
@@ -1981,6 +2614,46 @@ def run_review(self, review_id: str):
             self.update_state(state="PROGRESS", meta={"step": "indexing", "progress": 0, "detail": "解析投标文件"})
 
             paragraphs = parse_document(review.tender_file_path)
+
+            # Step 1b: Desensitize PII (2-3%)
+            review.progress = 2
+            review.current_step = "信息脱敏"
+            db.commit()
+            self.update_state(state="PROGRESS", meta={"step": "indexing", "progress": 2, "detail": "信息脱敏"})
+
+            paragraphs, pii_mapping = desensitize_paragraphs(paragraphs)
+            logger.info("PII desensitization: %d items masked", len(pii_mapping))
+
+            # Step 1c: Extract images (3-5%)
+            review.progress = 3
+            review.current_step = "提取图片"
+            db.commit()
+            self.update_state(state="PROGRESS", meta={"step": "indexing", "progress": 3, "detail": "提取图片"})
+
+            import os
+            images_dir = os.path.join(os.path.dirname(review.tender_file_path), "images")
+            extracted_images = extract_images(review.tender_file_path, images_dir)
+            logger.info("Extracted %d images from tender document", len(extracted_images))
+
+            # Inject image markers into paragraphs for LLM awareness
+            # Build index→list_position map (para.index may not equal list position)
+            index_to_pos = {p.index: pos for pos, p in enumerate(paragraphs)}
+
+            image_by_para = {}
+            for img in extracted_images:
+                pi = img.get("near_para_index")
+                if pi is not None:
+                    image_by_para.setdefault(pi, []).append(img["filename"])
+
+            from dataclasses import replace as dc_replace
+            for pi, filenames in image_by_para.items():
+                pos = index_to_pos.get(pi)
+                if pos is not None:
+                    marker = " ".join(f"[图片: {fn}]" for fn in filenames)
+                    paragraphs[pos] = dc_replace(
+                        paragraphs[pos],
+                        text=paragraphs[pos].text + f" {marker}",
+                    )
 
             # Step 2: Build index (5-10%)
             review.progress = 5
@@ -2148,6 +2821,14 @@ def run_review(self, review_id: str):
                 review.tender_file_path, review_items, summary,
                 bid_filename=bid_task.filename, output_dir=output_dir,
             )
+
+            # Store images metadata in summary for preview API
+            summary["extracted_images"] = [
+                {"filename": img["filename"], "near_para_index": img.get("near_para_index"),
+                 "content_type": img.get("content_type", "")}
+                for img in extracted_images
+            ]
+            summary["pii_masked_count"] = len(pii_mapping)
 
             review.review_summary = summary
             review.review_items = review_items
@@ -3037,10 +3718,10 @@ git commit -m "feat(frontend): add review preview stage and results view"
 
 ## Chunk 6: 预览 API + 集成测试 + 部署
 
-### Task 14: 预览 API 端点
+### Task 14: 预览 API 端点 + 图片服务
 
 **Files:**
-- Modify: `server/app/routers/reviews.py` (添加 preview 端点)
+- Modify: `server/app/routers/reviews.py` (添加 preview 端点 + 图片服务端点)
 
 - [ ] **Step 1: 添加 preview 端点**
 
@@ -3073,7 +3754,8 @@ async def preview_review(
 
     doc = Document(review.tender_file_path)
     body = doc.element.body
-    parts = []
+    parts = []          # list of (html_str, element_index) tuples
+    element_idx = 0     # matches parse_docx body-level element index
     para_idx = 0
     table_idx = 0
 
@@ -3081,8 +3763,8 @@ async def preview_review(
         if child.tag == qn("w:p"):
             if para_idx < len(doc.paragraphs):
                 html_str = _para_to_html(doc.paragraphs[para_idx])
-                if html_str and para_idx in para_review_map:
-                    items = para_review_map[para_idx]
+                if html_str and element_idx in para_review_map:
+                    items = para_review_map[element_idx]
                     # Space-separated IDs for CSS ~= selector: [data-review-id~="3"]
                     review_ids = " ".join(str(item["id"]) for item in items)
                     result = "fail" if any(i["result"] == "fail" for i in items) else "warning"
@@ -3092,25 +3774,86 @@ async def preview_review(
                         "<p", f'<p data-review-id="{review_ids}" class="{css_class}"', 1
                     )
                 if html_str:
-                    parts.append(html_str)
+                    parts.append((html_str, element_idx))
                 para_idx += 1
+            element_idx += 1
         elif child.tag == qn("w:tbl"):
             if table_idx < len(doc.tables):
-                parts.append(_table_to_html(doc.tables[table_idx]))
+                parts.append((_table_to_html(doc.tables[table_idx]), element_idx))
                 table_idx += 1
+            element_idx += 1
+
+    # Build image map: para_index → image filenames for inline display
+    summary = review.review_summary or {}
+    extracted_images = summary.get("extracted_images", [])
+    para_image_map: dict[int, list[str]] = {}
+    for img in extracted_images:
+        pi = img.get("near_para_index")
+        if pi is not None:
+            para_image_map.setdefault(pi, []).append(img["filename"])
+
+    # Inject <img> tags after elements that contain images
+    from html import escape as html_escape
+    final_parts = []
+    for html_part, elem_idx in parts:
+        final_parts.append(html_part)
+        if elem_idx in para_image_map:
+            for fn in para_image_map[elem_idx]:
+                safe_fn = html_escape(fn)
+                final_parts.append(
+                    f'<div class="review-image" data-para-index="{elem_idx}">'
+                    f'<img src="/api/reviews/{review_id}/images/{safe_fn}" '
+                    f'alt="{safe_fn}" loading="lazy" />'
+                    f'</div>'
+                )
 
     return {
-        "tender_html": "\n".join(parts),
+        "tender_html": "\n".join(final_parts),
         "review_items": review.review_items or [],
-        "summary": review.review_summary or {},
+        "summary": summary,
     }
 ```
 
-- [ ] **Step 2: Commit**
+- [ ] **Step 2: 添加图片服务端点**
+
+```python
+# server/app/routers/reviews.py — 在 preview endpoint 之后添加
+
+@router.get("/{review_id}/images/{filename}")
+async def serve_review_image(
+    review_id: str,
+    filename: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve an extracted image from a review task."""
+    review = await get_review(db, review_id, user.id)
+    if not review:
+        raise HTTPException(status_code=404, detail="审查任务不存在")
+
+    import os
+    images_dir = os.path.join(os.path.dirname(review.tender_file_path), "images")
+    image_path = os.path.join(images_dir, filename)
+
+    # Security: ensure filename doesn't escape the images directory
+    if not os.path.realpath(image_path).startswith(os.path.realpath(images_dir)):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if not os.path.exists(image_path):
+        raise HTTPException(status_code=404, detail="图片不存在")
+
+    content_type = {
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".gif": "image/gif", ".bmp": "image/bmp",
+    }.get(os.path.splitext(filename)[1].lower(), "application/octet-stream")
+
+    return FileResponse(image_path, media_type=content_type)
+```
+
+- [ ] **Step 3: Commit**
 
 ```bash
 git add server/app/routers/reviews.py
-git commit -m "feat(api): add review preview endpoint with HTML annotation injection"
+git commit -m "feat(api): add review preview endpoint with images + annotation injection"
 ```
 
 ---
