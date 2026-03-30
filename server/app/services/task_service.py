@@ -55,12 +55,16 @@ async def get_tasks(
     page: int = 1,
     page_size: int = 20,
     status: str | None = None,
+    q: str | None = None,
 ) -> tuple[list, int]:
     query = select(Task).where(Task.user_id == user_id).order_by(Task.created_at.desc())
     count_query = select(func.count()).select_from(Task).where(Task.user_id == user_id)
     if status:
         query = query.where(Task.status == status)
         count_query = count_query.where(Task.status == status)
+    if q:
+        query = query.where(Task.filename.ilike(f"%{q}%"))
+        count_query = count_query.where(Task.filename.ilike(f"%{q}%"))
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0
     query = query.offset((page - 1) * page_size).limit(page_size)
