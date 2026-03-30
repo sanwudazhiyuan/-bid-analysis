@@ -9,6 +9,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from server.app.routers import auth, tasks, download, preview, annotations, users, files
+import server.app.models.review_task  # noqa: F401 — ensure table is created
 
 app = FastAPI(title="招标文件分析系统", version="1.0.0")
 
