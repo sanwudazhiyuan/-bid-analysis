@@ -23,10 +23,10 @@ def run_review(self, review_id: str):
     from src.parser.unified import parse_document
     from src.reviewer.desensitizer import desensitize_paragraphs
     from src.reviewer.image_extractor import extract_images
-    from src.reviewer.toc_detector import detect_toc
-    from src.reviewer.tender_indexer import build_index_from_toc, get_chapter_text
+    from src.reviewer.tender_rule_splitter import build_tender_index
+    from src.reviewer.tender_indexer import get_chapter_text
     from src.reviewer.clause_extractor import extract_review_clauses, extract_project_context
-    from src.reviewer.clause_mapper import llm_map_clauses_to_chapters, llm_extract_toc
+    from src.reviewer.clause_mapper import llm_map_clauses_to_chapters
     from src.reviewer.reviewer import llm_review_clause, llm_review_batch, compute_summary
     from src.reviewer.docx_annotator import generate_review_docx
     from src.config import load_settings
@@ -106,15 +106,12 @@ def run_review(self, review_id: str):
             db.commit()
             self.update_state(state="PROGRESS", meta={"step": "indexing", "progress": 5, "detail": "构建索引"})
 
-            toc = detect_toc(paragraphs)
-            if toc:
-                tender_index = build_index_from_toc(toc, paragraphs)
-                tender_index["toc_source"] = "document_toc"
-            else:
-                logger.info("No TOC detected, using LLM to extract chapters")
-                toc = llm_extract_toc(paragraphs, api_settings)
-                tender_index = build_index_from_toc(toc, paragraphs)
-                tender_index["toc_source"] = "llm_generated"
+            tender_index = build_tender_index(paragraphs, api_settings)
+            logger.info(
+                "Tender index built: source=%s, confidence=%.2f, chapters=%d",
+                tender_index.get("toc_source"), tender_index.get("confidence", 0),
+                len(tender_index.get("chapters", [])),
+            )
             review.tender_index = tender_index
 
             # Step 3: Extract clauses (10-15%)
