@@ -132,8 +132,20 @@ def _sections_to_chapters(sections: list[dict], total_paragraphs: int) -> list[d
 
     sorted_secs = sorted(sections, key=lambda s: s["start"])
 
-    # 计算 end_para
+    # 分离 level-1 和子级
+    l1_indices = [i for i, s in enumerate(sorted_secs) if s["level"] == 1]
+
+    # 计算 level-1 的 end_para（到下一个 level-1 之前）
+    for pos, idx in enumerate(l1_indices):
+        if pos + 1 < len(l1_indices):
+            sorted_secs[idx]["end"] = sorted_secs[l1_indices[pos + 1]]["start"] - 1
+        else:
+            sorted_secs[idx]["end"] = total_paragraphs - 1
+
+    # 计算子级的 end_para（到下一个同级或更高级之前）
     for i, sec in enumerate(sorted_secs):
+        if sec["level"] == 1:
+            continue
         if i + 1 < len(sorted_secs):
             sec["end"] = sorted_secs[i + 1]["start"] - 1
         else:
@@ -221,10 +233,13 @@ def strategy_toc(paragraphs: list[Paragraph]) -> list[dict] | None:
 def _match_toc_to_body(
     toc_entries: list[dict], paragraphs: list[Paragraph]
 ) -> list[dict]:
-    """将 TOC 条目模糊匹配到正文段落，返回 sections。"""
+    """将 TOC 条目模糊匹配到正文段落，返回 sections。跳过 TOC 区域本身。"""
     sections: list[dict] = []
     for entry in toc_entries:
         for para in paragraphs:
+            # 跳过 TOC style 的段落，避免匹配到目录区域本身
+            if _has_toc_style(para):
+                continue
             if _fuzzy_match(entry["title"], para.text):
                 sections.append({
                     "title": entry["title"],
