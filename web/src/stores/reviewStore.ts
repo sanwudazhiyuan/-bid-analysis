@@ -29,10 +29,19 @@ export const useReviewStore = defineStore('review', () => {
     }
   }
 
+  const REVIEW_STEP_LABELS: Record<string, string> = {
+    indexing: '索引',
+    extracting: '条款提取',
+    p0_review: '废标审查',
+    p1_review: '资格审查',
+    p2_review: '评分审查',
+    generating: '生成报告',
+  }
+
   function handleProgressEvent(event: { progress: number; step: string; detail?: string; error?: string }) {
     progress.value = event.progress
     currentStep.value = event.step
-    detail.value = event.detail || ''
+    detail.value = event.detail || REVIEW_STEP_LABELS[event.step] || ''
     error.value = event.error || null
 
     if (event.step === 'completed') {
