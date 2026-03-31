@@ -259,3 +259,33 @@ class TestDotNumberRegex:
         """单个数字不匹配。"""
         from src.reviewer.tender_rule_splitter import _RE_DOT
         assert not _RE_DOT.match("1 概述")
+
+
+class TestBuildChapterTreeText:
+    def test_output_format(self):
+        """验证章节树文本输出缩进和叶子标签。"""
+        from src.reviewer.clause_mapper import _build_chapter_tree_text
+
+        tender_index = {"chapters": [
+            {"path": "/第一章", "para_count": 20, "is_leaf": False, "needs_split": False, "children": [
+                {"path": "/第一章/1.1", "para_count": 10, "is_leaf": True, "needs_split": False, "children": []},
+                {"path": "/第一章/1.2", "para_count": 10, "is_leaf": True, "needs_split": False, "children": []},
+            ]},
+        ]}
+        text = _build_chapter_tree_text(tender_index)
+        lines = text.strip().split("\n")
+        assert len(lines) == 3
+        assert "/第一章" in lines[0]
+        assert "叶子" not in lines[0]  # 非叶子不标记
+        assert "  /第一章/1.1" in lines[1]  # 缩进
+        assert "叶子" in lines[1]
+
+    def test_needs_split_tag(self):
+        """需要拆分的叶子显示拆分标签。"""
+        from src.reviewer.clause_mapper import _build_chapter_tree_text
+
+        tender_index = {"chapters": [
+            {"path": "/大章", "para_count": 2000, "is_leaf": True, "needs_split": True, "children": []},
+        ]}
+        text = _build_chapter_tree_text(tender_index)
+        assert "需拆分" in text

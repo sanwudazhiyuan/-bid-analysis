@@ -42,7 +42,9 @@ def llm_extract_toc(paragraphs, api_settings: dict | None = None) -> list[dict]:
 def llm_map_clauses_to_chapters(
     clauses: list[dict], tender_index: dict, api_settings: dict | None = None
 ) -> dict[int, list[str]]:
-    """Map clause indices to relevant chapter titles via LLM.
+    """[DEPRECATED] Use llm_map_clauses_to_leaf_nodes instead.
+
+    Map clause indices to relevant chapter titles via LLM.
 
     Returns: {clause_index: [chapter_title, ...]}
     """
@@ -76,5 +78,66 @@ def llm_map_clauses_to_chapters(
             chapters = item.get("relevant_chapters", [])
             if idx is not None:
                 mapping[idx] = chapters
+
+    return mapping
+
+
+def _build_chapter_tree_text(tender_index: dict) -> str:
+    """将章节树格式化为供 LLM 阅读的缩进文本。"""
+    lines: list[str] = []
+
+    def _walk(nodes: list[dict], depth: int = 0) -> None:
+        indent = "  " * depth
+        for node in nodes:
+            leaf_tag = ", 叶子" if node.get("is_leaf") else ""
+            split_tag = ", 需拆分" if node.get("needs_split") else ""
+            lines.append(
+                f"{indent}{node['path']} [段落数: {node.get('para_count', 0)}{leaf_tag}{split_tag}]"
+            )
+            _walk(node.get("children", []), depth + 1)
+
+    _walk(tender_index.get("chapters", []))
+    return "\n".join(lines)
+
+
+def llm_map_clauses_to_leaf_nodes(
+    clauses: list[dict],
+    tender_index: dict,
+    api_settings: dict | None = None,
+) -> dict[int, list[str]]:
+    """Map clauses to leaf node paths. Returns {clause_index: [path, ...]}.
+
+    替代 llm_map_clauses_to_chapters，映射到精确的叶子节点 path 而非章节标题。
+    """
+    chapter_tree_text = _build_chapter_tree_text(tender_index)
+
+    clauses_text = "\n".join(
+        f"[{c['clause_index']}] [{c['severity']}] {c['clause_text']}"
+        for c in clauses
+    )
+
+    prompt_template = _MAPPING_PROMPT_PATH.read_text(encoding="utf-8")
+    prompt = (
+        prompt_template
+        .replace("{clauses}", clauses_text)
+        .replace("{chapter_tree}", chapter_tree_text)
+    )
+
+    messages = build_messages(system="你是招标审查专家。", user=prompt)
+    result = call_qwen(messages, api_settings)
+
+    mapping: dict[int, list[str]] = {}
+    if isinstance(result, list):
+        for item in result:
+            idx = item.get("clause_index")
+            paths = item.get("relevant_paths", [])
+            if idx is not None:
+                mapping[idx] = paths
+    elif isinstance(result, dict) and "mappings" in result:
+        for item in result["mappings"]:
+            idx = item.get("clause_index")
+            paths = item.get("relevant_paths", [])
+            if idx is not None:
+                mapping[idx] = paths
 
     return mapping
