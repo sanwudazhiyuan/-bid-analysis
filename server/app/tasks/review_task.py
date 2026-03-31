@@ -122,7 +122,7 @@ def run_review(self, review_id: str):
             review.progress = 10
             review.current_step = "提取审查条款"
             db.commit()
-            self.update_state(state="PROGRESS", meta={"step": "reviewing", "progress": 10, "detail": "提取条款"})
+            self.update_state(state="PROGRESS", meta={"step": "extracting", "progress": 10, "detail": "提取条款"})
 
             clauses = extract_review_clauses(extracted_data)
             project_context = extract_project_context(extracted_data)
@@ -136,7 +136,7 @@ def run_review(self, review_id: str):
                 return {"status": "completed", "review_id": review_id, "clauses": 0}
 
             # Step 4: Chapter mapping (12-15%)
-            self.update_state(state="PROGRESS", meta={"step": "reviewing", "progress": 12, "detail": "条款映射"})
+            self.update_state(state="PROGRESS", meta={"step": "extracting", "progress": 12, "detail": "条款映射"})
             chapter_mapping = llm_map_clauses_to_chapters(clauses, tender_index, api_settings)
 
             # Step 5: P0 review (15-60%)
@@ -149,7 +149,7 @@ def run_review(self, review_id: str):
                 review.current_step = f"废标审查 [{i+1}/{len(p0)}]"
                 db.commit()
                 self.update_state(state="PROGRESS", meta={
-                    "step": "reviewing", "progress": progress,
+                    "step": "p0_review", "progress": progress,
                     "detail": f"废标审查 [{i+1}/{len(p0)}]",
                 })
 
@@ -180,10 +180,10 @@ def run_review(self, review_id: str):
                     batch = p1[bi:bi + batch_size]
                     batch_progress = 60 + int(25 * bi / max(len(p1), 1))
                     review.progress = batch_progress
-                    review.current_step = f"资格/编制审查 [{bi+1}-{min(bi+batch_size, len(p1))}/{len(p1)}]"
+                    review.current_step = f"资格审查 [{bi+1}-{min(bi+batch_size, len(p1))}/{len(p1)}]"
                     db.commit()
                     self.update_state(state="PROGRESS", meta={
-                        "step": "reviewing", "progress": batch_progress,
+                        "step": "p1_review", "progress": batch_progress,
                         "detail": review.current_step,
                     })
 
@@ -219,10 +219,10 @@ def run_review(self, review_id: str):
                     batch = p2[bi:bi + batch_size]
                     batch_progress = 85 + int(10 * bi / max(len(p2), 1))
                     review.progress = batch_progress
-                    review.current_step = f"评标审查 [{bi+1}-{min(bi+batch_size, len(p2))}/{len(p2)}]"
+                    review.current_step = f"评分审查 [{bi+1}-{min(bi+batch_size, len(p2))}/{len(p2)}]"
                     db.commit()
                     self.update_state(state="PROGRESS", meta={
-                        "step": "reviewing", "progress": batch_progress,
+                        "step": "p2_review", "progress": batch_progress,
                         "detail": review.current_step,
                     })
 
