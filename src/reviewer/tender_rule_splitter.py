@@ -14,6 +14,7 @@ import logging
 from collections import Counter
 
 from src.models import Paragraph
+from src.reviewer.chapter_tree import collect_all_paths
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ _RE_CHAPTER = re.compile(
 )
 _RE_ORDINAL = re.compile(r"^[一二三四五六七八九十]+[、\.\．]")
 _RE_PAREN = re.compile(r"^（[一二三四五六七八九十]+）|^\([一二三四五六七八九十]+\)")
+_RE_DOT = re.compile(r"^\d+(?:\.\d+)+")
 
 _MAX_HEADING_LEN = 80
 
@@ -126,51 +128,9 @@ def _select_best_strategy(
 
 
 def _sections_to_chapters(sections: list[dict], total_paragraphs: int) -> list[dict]:
-    """将扁平 sections 转换为层级 chapters 格式（兼容 tender_indexer）。"""
-    if not sections:
-        return []
-
-    sorted_secs = sorted(sections, key=lambda s: s["start"])
-
-    # 分离 level-1 和子级
-    l1_indices = [i for i, s in enumerate(sorted_secs) if s["level"] == 1]
-
-    # 计算 level-1 的 end_para（到下一个 level-1 之前）
-    for pos, idx in enumerate(l1_indices):
-        if pos + 1 < len(l1_indices):
-            sorted_secs[idx]["end"] = sorted_secs[l1_indices[pos + 1]]["start"] - 1
-        else:
-            sorted_secs[idx]["end"] = total_paragraphs - 1
-
-    # 计算子级的 end_para（到下一个同级或更高级之前）
-    for i, sec in enumerate(sorted_secs):
-        if sec["level"] == 1:
-            continue
-        if i + 1 < len(sorted_secs):
-            sec["end"] = sorted_secs[i + 1]["start"] - 1
-        else:
-            sec["end"] = total_paragraphs - 1
-
-    # 构建层级
-    root_chapters: list[dict] = []
-    current_parent: dict | None = None
-    for sec in sorted_secs:
-        ch = {
-            "title": sec["title"],
-            "level": sec["level"],
-            "start_para": sec["start"],
-            "end_para": sec["end"],
-            "children": [],
-        }
-        if sec["level"] == 1:
-            current_parent = ch
-            root_chapters.append(ch)
-        elif current_parent is not None:
-            current_parent["children"].append(ch)
-        else:
-            root_chapters.append(ch)
-
-    return root_chapters
+    """对外接口：调用 chapter_tree.build_chapter_tree 构建任意深度树。"""
+    from src.reviewer.chapter_tree import build_chapter_tree
+    return build_chapter_tree(sections, total_paragraphs)
 
 
 # ========== 策略实现 ==========
@@ -344,6 +304,11 @@ def strategy_numbering(paragraphs: list[Paragraph]) -> list[dict]:
             sections.append({"title": text, "start": p.index, "level": 2})
         elif _RE_PAREN.match(text) and len(text) < _MAX_HEADING_LEN:
             sections.append({"title": text, "start": p.index, "level": 3})
+        # Level 4+: 数字层级 1.1 / 1.1.1 / 1.1.1.1
+        elif _RE_DOT.match(text):
+            dot_count = text.split()[0].count(".")
+            level = 3 + dot_count  # 1.1→L4, 1.1.1→L5, 1.1.1.1→L6
+            sections.append({"title": text, "start": p.index, "level": level})
 
     return sections
 
@@ -374,10 +339,12 @@ def build_tender_index(
         top = [s for s in toc_sections if s["level"] == 1] or toc_sections
         assigned = _count_assigned(paragraphs, toc_sections)
         confidence = compute_confidence(len(top), total, assigned)
+        all_paths = collect_all_paths(chapters)
         return {
             "toc_source": "document_toc",
             "confidence": confidence,
             "chapters": chapters,
+            "all_paths": all_paths,
         }
 
     # 策略 2-4：竞争赛道
@@ -404,16 +371,29 @@ def build_tender_index(
             toc = llm_extract_toc(paragraphs, api_settings)
             if toc:
                 index = build_index_from_toc(toc, paragraphs)
-                index["toc_source"] = "llm_generated"
-                index["confidence"] = 0.5
-                return index
+                # 重建为新格式树
+                flat_sections = []
+                for ch in index.get("chapters", []):
+                    flat_sections.append({"title": ch["title"], "start": ch["start_para"], "level": ch["level"]})
+                    for child in ch.get("children", []):
+                        flat_sections.append({"title": child["title"], "start": child["start_para"], "level": child["level"]})
+                chapters = _sections_to_chapters(flat_sections, total)
+                all_paths = collect_all_paths(chapters)
+                return {
+                    "toc_source": "llm_generated",
+                    "confidence": 0.5,
+                    "chapters": chapters,
+                    "all_paths": all_paths,
+                }
         except Exception as e:
             logger.warning("LLM 兜底索引失败: %s", e)
 
     # 使用最佳规则结果
     chapters = _sections_to_chapters(best_sections, total)
+    all_paths = collect_all_paths(chapters)
     return {
         "toc_source": best_name or "numbering",
         "confidence": best_confidence,
         "chapters": chapters,
+        "all_paths": all_paths,
     }

@@ -189,7 +189,9 @@ class TestSectionsToChapters:
         assert len(chapters) == 2
         assert len(chapters[0]["children"]) == 1
         assert chapters[0]["children"][0]["title"] == "1.1 小节"
-        assert chapters[0]["end_para"] == 4
+        # build_chapter_tree 按"下一相邻节点 start-1"计算 end_para：
+        # 第一章 start=0，下一节点（1.1 小节）start=3，故 end_para=2
+        assert chapters[0]["end_para"] == 2
         assert chapters[1]["end_para"] == 9
 
 
@@ -238,3 +240,22 @@ class TestBuildTenderIndex:
             assert "start_para" in ch
             assert "end_para" in ch
             assert "children" in ch
+
+
+# ========== 扩展正则（数字层级）==========
+
+class TestDotNumberRegex:
+    def test_dot_number_l4(self):
+        """1.1.1 匹配为 level 4+。"""
+        from src.reviewer.tender_rule_splitter import _RE_DOT
+        assert _RE_DOT.match("1.1.1 基本信息")
+
+    def test_dot_number_l5(self):
+        """1.1.1.1 匹配为 level 4+。"""
+        from src.reviewer.tender_rule_splitter import _RE_DOT
+        assert _RE_DOT.match("1.1.1.1 公司名称")
+
+    def test_dot_number_not_single(self):
+        """单个数字不匹配。"""
+        from src.reviewer.tender_rule_splitter import _RE_DOT
+        assert not _RE_DOT.match("1 概述")
