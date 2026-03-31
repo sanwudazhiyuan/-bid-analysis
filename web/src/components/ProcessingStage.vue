@@ -1,6 +1,13 @@
 <script setup lang="ts">
 import { FileText } from 'lucide-vue-next'
 
+const defaultSteps = [
+  { key: 'parsing', label: '解析' },
+  { key: 'indexing', label: '索引' },
+  { key: 'extracting', label: '提取' },
+  { key: 'generating', label: '生成' },
+]
+
 const props = defineProps<{
   filename: string
   progress: number
@@ -8,18 +15,14 @@ const props = defineProps<{
   detail: string
   mode: 'processing' | 'reprocessing' | 'generating'
   error?: string | null
+  customSteps?: Array<{ key: string; label: string }>
 }>()
 
 const emit = defineEmits<{
   retry: []
 }>()
 
-const steps = [
-  { key: 'parsing', label: '解析' },
-  { key: 'indexing', label: '索引' },
-  { key: 'extracting', label: '提取' },
-  { key: 'generating', label: '生成' },
-]
+const steps = props.customSteps || defaultSteps
 
 const modeLabels = {
   processing: '解析中',
