@@ -163,6 +163,31 @@ def _highlight_paragraph(para, color: str = "yellow"):
         highlight.set(qn("w:val"), color)
 
 
+def _build_para_review_map(review_items: list[dict]) -> dict[int, list[dict]]:
+    """建立全局段落索引 → 相关 review_items 的映射。
+
+    兼容新旧两种格式：
+    - 新格式: tender_locations[].global_para_indices
+    - 旧格式: tender_locations[].para_indices
+    """
+    para_map: dict[int, list[dict]] = {}
+    for item in review_items:
+        if item["result"] not in ("fail", "warning"):
+            continue
+        seen_paras: set[int] = set()  # 同一 item 同一 para 只记录一次
+        for loc in item.get("tender_locations", []):
+            # 新格式
+            indices = loc.get("global_para_indices", [])
+            # 旧格式 fallback
+            if not indices:
+                indices = loc.get("para_indices", [])
+            for pi in indices:
+                if pi not in seen_paras:
+                    seen_paras.add(pi)
+                    para_map.setdefault(pi, []).append(item)
+    return para_map
+
+
 def generate_review_docx(
     tender_file_path: str,
     review_items: list[dict],
@@ -178,12 +203,7 @@ def generate_review_docx(
     doc = Document(tender_file_path)
 
     # Build para_index → review_items mapping
-    para_review_map: dict[int, list[dict]] = {}
-    for item in review_items:
-        if item["result"] in ("fail", "warning"):
-            for loc in item.get("tender_locations", []):
-                for pi in loc.get("para_indices", []):
-                    para_review_map.setdefault(pi, []).append(item)
+    para_review_map = _build_para_review_map(review_items)
 
     # Add comments
     comment_mgr = _CommentManager(doc)

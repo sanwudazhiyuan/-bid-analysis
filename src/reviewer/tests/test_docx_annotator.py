@@ -99,3 +99,55 @@ def test_generate_review_docx_has_word_comments():
             assert "word/comments.xml" in z.namelist()
             comments_xml = z.read("word/comments.xml").decode("utf-8")
             assert "未找到密封说明" in comments_xml
+
+
+class TestBuildParaReviewMap:
+    def test_new_format_global_para_indices(self):
+        """新格式 global_para_indices 正确映射。"""
+        from src.reviewer.docx_annotator import _build_para_review_map
+
+        items = [{
+            "result": "fail", "severity": "critical",
+            "tender_locations": [{
+                "batch_id": "/ch1#0",
+                "path": "/ch1",
+                "global_para_indices": [5, 6, 7],
+                "text_snippet": "test",
+            }],
+        }]
+        para_map = _build_para_review_map(items)
+        assert 5 in para_map
+        assert 6 in para_map
+        assert 7 in para_map
+        assert len(para_map[5]) == 1
+
+    def test_old_format_para_indices(self):
+        """旧格式 para_indices 仍然兼容。"""
+        from src.reviewer.docx_annotator import _build_para_review_map
+
+        items = [{
+            "result": "fail", "severity": "critical",
+            "tender_locations": [{
+                "chapter": "第一章",
+                "para_indices": [10, 11],
+                "text_snippet": "test",
+            }],
+        }]
+        para_map = _build_para_review_map(items)
+        assert 10 in para_map
+        assert 11 in para_map
+
+    def test_dedup_same_para(self):
+        """同一段落同一 item 只出现一次。"""
+        from src.reviewer.docx_annotator import _build_para_review_map
+
+        item = {
+            "result": "fail", "severity": "critical",
+            "tender_locations": [
+                {"global_para_indices": [5], "text_snippet": "a"},
+                {"global_para_indices": [5], "text_snippet": "b"},
+            ],
+        }
+        para_map = _build_para_review_map([item])
+        # 同一 item 在同一 para 只记录一次
+        assert len(para_map[5]) == 1
