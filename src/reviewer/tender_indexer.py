@@ -1,5 +1,7 @@
 """Build chapter index from TOC entries + paragraphs."""
 import difflib
+import logging
+from dataclasses import dataclass
 from src.models import Paragraph
 
 
@@ -80,3 +82,145 @@ def get_chapter_text(
                     lines.append(f"[{para.index}] {para.text}")
 
     return "\n".join(lines) if lines else ""
+
+
+logger = logging.getLogger(__name__)
+
+LEAF_SPLIT_THRESHOLD = 1200
+MAX_CHARS_PER_BATCH = 30000
+
+
+@dataclass
+class ClauseBatch:
+    """一个条款在某个叶子节点上的段落批次。"""
+    clause_index: int
+    path: str
+    batch_id: str
+    paragraphs: list  # list[Paragraph]
+
+
+def find_node_by_path(tender_index: dict, path: str) -> dict | None:
+    """根据 path 精确查找节点（DFS）。"""
+    def dfs(nodes):
+        for node in nodes:
+            if node.get("path") == path:
+                return node
+            found = dfs(node.get("children", []))
+            if found:
+                return found
+        return None
+    return dfs(tender_index.get("chapters", []))
+
+
+def get_text_for_clause(
+    clause_index: int,
+    paths: list[str],
+    tender_index: dict,
+    paragraphs: list,
+) -> list[ClauseBatch]:
+    """为单个条款获取精确段落批次。
+
+    每个 path 单独提取段落；叶子节点段落数 > 1200 时按字符数拆分。
+    """
+    batches: list[ClauseBatch] = []
+
+    for path in paths:
+        node = find_node_by_path(tender_index, path)
+        if not node:
+            logger.warning("Path not found: %s", path)
+            continue
+
+        node_paras = _get_paragraphs_in_node(node, paragraphs)
+        if not node_paras:
+            continue
+
+        if len(node_paras) > LEAF_SPLIT_THRESHOLD:
+            sub_batches = _split_by_char_count(node_paras, MAX_CHARS_PER_BATCH)
+            for i, sub_paras in enumerate(sub_batches):
+                batches.append(ClauseBatch(
+                    clause_index=clause_index,
+                    path=path,
+                    batch_id=f"{path}#{i}",
+                    paragraphs=sub_paras,
+                ))
+        else:
+            batches.append(ClauseBatch(
+                clause_index=clause_index,
+                path=path,
+                batch_id=f"{path}#0",
+                paragraphs=node_paras,
+            ))
+
+    return batches
+
+
+def _get_paragraphs_in_node(node: dict, paragraphs: list) -> list:
+    """获取节点范围内的所有段落（排除子节点的标题段落）。"""
+    start = node["start_para"]
+    end = node["end_para"]
+
+    # 收集所有后代节点的 start_para（即标题段落），排除自身
+    child_starts: set[int] = set()
+    def _collect_child_starts(children: list[dict]) -> None:
+        for ch in children:
+            child_starts.add(ch["start_para"])
+            _collect_child_starts(ch.get("children", []))
+    _collect_child_starts(node.get("children", []))
+
+    return [p for p in paragraphs if start <= p.index <= end and p.index not in child_starts]
+
+
+def _split_by_char_count(paragraphs: list, max_chars: int) -> list[list]:
+    """按字符数拆分段落列表。"""
+    batches: list[list] = []
+    current_batch: list = []
+    current_chars = 0
+
+    for para in paragraphs:
+        para_chars = len(para.text)
+        if current_chars + para_chars > max_chars and current_batch:
+            batches.append(current_batch)
+            current_batch = []
+            current_chars = 0
+        current_batch.append(para)
+        current_chars += para_chars
+
+    if current_batch:
+        batches.append(current_batch)
+
+    return batches
+
+
+def paragraphs_to_text(paragraphs: list) -> str:
+    """将段落列表拼接为审查用文本。"""
+    return "\n".join(f"[{p.index}] {p.text}" for p in paragraphs)
+
+
+def map_review_location(batch: ClauseBatch, result_location: dict) -> dict:
+    """将批次内段落索引映射回全局段落索引。"""
+    local_idx = result_location.get("para_index", 0)
+    global_idx = local_idx + batch.paragraphs[0].index if batch.paragraphs else local_idx
+    return {
+        "batch_id": batch.batch_id,
+        "path": batch.path,
+        "global_para_index": global_idx,
+        "text_snippet": result_location.get("text_snippet", ""),
+    }
+
+
+def map_batch_indices_to_global(result: dict, batch: ClauseBatch) -> dict:
+    """将 llm_review_clause 返回结果中的批次内索引映射为全局索引。"""
+    mapped_locations = []
+    for loc in result.get("tender_locations", []):
+        for pi in loc.get("para_indices", []):
+            mapped = map_review_location(batch, {"para_index": pi, "text_snippet": loc.get("text_snippet", "")})
+            mapped_locations.append(mapped)
+
+    result["tender_locations"] = [{
+        "batch_id": batch.batch_id,
+        "path": batch.path,
+        "global_para_indices": [loc["global_para_index"] for loc in mapped_locations],
+        "text_snippet": mapped_locations[0]["text_snippet"] if mapped_locations else "",
+    }] if mapped_locations else []
+
+    return result
