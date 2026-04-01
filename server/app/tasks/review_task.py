@@ -24,10 +24,12 @@ def run_review(self, review_id: str):
     from src.reviewer.desensitizer import desensitize_paragraphs
     from src.reviewer.image_extractor import extract_images
     from src.reviewer.tender_rule_splitter import build_tender_index
-    from src.reviewer.tender_indexer import get_chapter_text
     from src.reviewer.clause_extractor import extract_review_clauses, extract_project_context
-    from src.reviewer.clause_mapper import llm_map_clauses_to_chapters
-    from src.reviewer.reviewer import llm_review_clause, llm_review_batch, compute_summary
+    from src.reviewer.clause_mapper import llm_map_clauses_to_leaf_nodes
+    from src.reviewer.tender_indexer import (
+        get_text_for_clause, paragraphs_to_text, map_batch_indices_to_global,
+    )
+    from src.reviewer.reviewer import llm_review_clause, compute_summary
     from src.reviewer.docx_annotator import generate_review_docx
     from src.config import load_settings
 
@@ -134,118 +136,113 @@ def run_review(self, review_id: str):
 
             # Step 4: Chapter mapping (12-15%)
             self.update_state(state="PROGRESS", meta={"step": "extracting", "progress": 12, "detail": "条款映射"})
-            chapter_mapping = llm_map_clauses_to_chapters(clauses, tender_index, api_settings)
+            clause_mapping = llm_map_clauses_to_leaf_nodes(clauses, tender_index, api_settings)
 
-            # Step 5: P0 review (15-60%)
+            # Step 5-7: 逐条独立审查 (15-95%)
+            _SEVERITY_ORDER = {"fail": 0, "error": 1, "warning": 2, "pass": 3}
+
+            def _is_worse(a: dict, b: dict) -> bool:
+                return _SEVERITY_ORDER.get(a.get("result", ""), 99) < _SEVERITY_ORDER.get(b.get("result", ""), 99)
+
+            def _no_match_item(clause: dict) -> dict:
+                return {
+                    "source_module": clause["source_module"],
+                    "clause_index": clause["clause_index"],
+                    "clause_text": clause["clause_text"],
+                    "result": "warning",
+                    "confidence": 0,
+                    "reason": "条款未能映射到投标文件任何章节节点",
+                    "severity": clause["severity"],
+                    "tender_locations": [],
+                }
+
             review_items = []
             item_id = 0
-            p0 = [c for c in clauses if c["severity"] == "critical"]
-            for i, clause in enumerate(p0):
-                progress = 15 + int(45 * i / max(len(p0), 1))
+            all_clauses = sorted(clauses, key=lambda c: {"critical": 0, "major": 1, "minor": 2}.get(c["severity"], 9))
+            clause_progress_start = 15
+            clause_progress_end = 95
+
+            for i, clause in enumerate(all_clauses):
+                progress = clause_progress_start + int(
+                    (clause_progress_end - clause_progress_start) * i / max(len(all_clauses), 1)
+                )
+                step_key = (
+                    "p0_review" if clause["severity"] == "critical" else
+                    "p1_review" if clause["severity"] == "major" else "p2_review"
+                )
                 review.progress = progress
-                review.current_step = f"废标审查 [{i+1}/{len(p0)}]"
+                review.current_step = f"审查 [{i+1}/{len(all_clauses)}] {clause['clause_text'][:20]}..."
                 db.commit()
                 self.update_state(state="PROGRESS", meta={
-                    "step": "p0_review", "progress": progress,
-                    "detail": f"废标审查 [{i+1}/{len(p0)}]",
+                    "step": step_key, "progress": progress,
+                    "detail": review.current_step,
                 })
 
-                chapters = chapter_mapping.get(clause["clause_index"], [])
-                relevant_text = get_chapter_text(paragraphs, tender_index, chapters)
-                if not relevant_text:
-                    relevant_text = "\n".join(f"[{p.index}] {p.text}" for p in paragraphs[:200])
+                paths = clause_mapping.get(clause["clause_index"], [])
+                if not paths:
+                    item = _no_match_item(clause)
+                    item["id"] = item_id
+                    review_items.append(item)
+                    item_id += 1
+                    continue
 
-                try:
-                    result = llm_review_clause(clause, relevant_text, project_context, api_settings)
-                    result["id"] = item_id
-                    review_items.append(result)
-                except Exception as e:
-                    logger.error("P0 review failed for clause %d: %s", clause["clause_index"], e)
-                    review_items.append({
-                        "id": item_id, "source_module": clause["source_module"],
-                        "clause_index": clause["clause_index"], "clause_text": clause["clause_text"],
-                        "result": "error", "confidence": 0, "reason": f"LLM 调用失败: {e}",
-                        "severity": clause["severity"], "tender_locations": [],
-                    })
+                batches = get_text_for_clause(
+                    clause["clause_index"], paths, tender_index, paragraphs
+                )
+
+                if not batches:
+                    item = _no_match_item(clause)
+                    item["id"] = item_id
+                    review_items.append(item)
+                    item_id += 1
+                    continue
+
+                if len(batches) == 1:
+                    batch = batches[0]
+                    tender_text = paragraphs_to_text(batch.paragraphs)
+                    try:
+                        result = llm_review_clause(clause, tender_text, project_context, api_settings)
+                        result = map_batch_indices_to_global(result, batch)
+                        result["id"] = item_id
+                        review_items.append(result)
+                    except Exception as e:
+                        logger.error("Clause review failed for %d: %s", clause["clause_index"], e)
+                        review_items.append({
+                            "id": item_id, "source_module": clause["source_module"],
+                            "clause_index": clause["clause_index"], "clause_text": clause["clause_text"],
+                            "result": "error", "confidence": 0, "reason": f"LLM 调用失败: {e}",
+                            "severity": clause["severity"], "tender_locations": [],
+                        })
+                else:
+                    # 多批次：各批次独立审查，取最严格结果但合并所有位置信息
+                    best_result = None
+                    all_locations = []
+                    for batch in batches:
+                        tender_text = paragraphs_to_text(batch.paragraphs)
+                        try:
+                            r = llm_review_clause(clause, tender_text, project_context, api_settings)
+                            r = map_batch_indices_to_global(r, batch)
+                            all_locations.extend(r.get("tender_locations", []))
+                            if best_result is None or _is_worse(r, best_result):
+                                best_result = r
+                        except Exception as e:
+                            logger.error("Clause batch review failed for %s: %s", batch.batch_id, e)
+                    if best_result is None:
+                        best_result = {
+                            "source_module": clause["source_module"],
+                            "clause_index": clause["clause_index"],
+                            "clause_text": clause["clause_text"],
+                            "result": "error", "confidence": 0,
+                            "reason": "所有批次 LLM 调用失败",
+                            "severity": clause["severity"], "tender_locations": [],
+                        }
+                    else:
+                        # 合并所有批次的位置信息
+                        best_result["tender_locations"] = all_locations
+                    best_result["id"] = item_id
+                    review_items.append(best_result)
+
                 item_id += 1
-
-            # Step 6: P1 batch review (60-85%)
-            p1 = [c for c in clauses if c["severity"] == "major"]
-            if p1:
-                batch_size = 8
-                for bi in range(0, len(p1), batch_size):
-                    batch = p1[bi:bi + batch_size]
-                    batch_progress = 60 + int(25 * bi / max(len(p1), 1))
-                    review.progress = batch_progress
-                    review.current_step = f"资格审查 [{bi+1}-{min(bi+batch_size, len(p1))}/{len(p1)}]"
-                    db.commit()
-                    self.update_state(state="PROGRESS", meta={
-                        "step": "p1_review", "progress": batch_progress,
-                        "detail": review.current_step,
-                    })
-
-                    all_chapters = set()
-                    for c in batch:
-                        all_chapters.update(chapter_mapping.get(c["clause_index"], []))
-                    relevant_text = get_chapter_text(paragraphs, tender_index, list(all_chapters))
-                    if not relevant_text:
-                        relevant_text = "\n".join(f"[{p.index}] {p.text}" for p in paragraphs[:200])
-
-                    try:
-                        results = llm_review_batch(batch, relevant_text, project_context, api_settings)
-                        for r in results:
-                            r["id"] = item_id
-                            review_items.append(r)
-                            item_id += 1
-                    except Exception as e:
-                        logger.error("P1 batch review failed: %s", e)
-                        for c in batch:
-                            review_items.append({
-                                "id": item_id, "source_module": c["source_module"],
-                                "clause_index": c["clause_index"], "clause_text": c["clause_text"],
-                                "result": "error", "confidence": 0, "reason": f"LLM 调用失败: {e}",
-                                "severity": c["severity"], "tender_locations": [],
-                            })
-                            item_id += 1
-
-            # Step 7: P2 batch review (85-95%)
-            p2 = [c for c in clauses if c["severity"] == "minor"]
-            if p2:
-                batch_size = 8
-                for bi in range(0, len(p2), batch_size):
-                    batch = p2[bi:bi + batch_size]
-                    batch_progress = 85 + int(10 * bi / max(len(p2), 1))
-                    review.progress = batch_progress
-                    review.current_step = f"评分审查 [{bi+1}-{min(bi+batch_size, len(p2))}/{len(p2)}]"
-                    db.commit()
-                    self.update_state(state="PROGRESS", meta={
-                        "step": "p2_review", "progress": batch_progress,
-                        "detail": review.current_step,
-                    })
-
-                    all_chapters = set()
-                    for c in batch:
-                        all_chapters.update(chapter_mapping.get(c["clause_index"], []))
-                    relevant_text = get_chapter_text(paragraphs, tender_index, list(all_chapters))
-                    if not relevant_text:
-                        relevant_text = "\n".join(f"[{p.index}] {p.text}" for p in paragraphs[:200])
-
-                    try:
-                        results = llm_review_batch(batch, relevant_text, project_context, api_settings)
-                        for r in results:
-                            r["id"] = item_id
-                            review_items.append(r)
-                            item_id += 1
-                    except Exception as e:
-                        logger.error("P2 batch review failed: %s", e)
-                        for c in batch:
-                            review_items.append({
-                                "id": item_id, "source_module": c["source_module"],
-                                "clause_index": c["clause_index"], "clause_text": c["clause_text"],
-                                "result": "error", "confidence": 0, "reason": f"LLM 调用失败: {e}",
-                                "severity": c["severity"], "tender_locations": [],
-                            })
-                            item_id += 1
 
             # Step 8: Generate docx (95-100%)
             review.progress = 95
