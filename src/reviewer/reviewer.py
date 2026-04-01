@@ -62,7 +62,10 @@ def llm_review_batch(
     project_context: str,
     api_settings: dict | None = None,
 ) -> list[dict]:
-    """Review multiple clauses in one LLM call. Returns list of review items."""
+    """[DEPRECATED] Use per-clause llm_review_clause instead.
+
+    Review multiple clauses in one LLM call. Returns list of review items.
+    """
     prompt_template = _BATCH_PROMPT_PATH.read_text(encoding="utf-8")
     clauses_json = json.dumps(
         [{"clause_index": c["clause_index"], "clause_text": c["clause_text"],
