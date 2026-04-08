@@ -99,13 +99,39 @@ def _build_input_text(paragraphs: list[TaggedParagraph]) -> str:
     return "\n".join(lines)
 
 
+def _summarize_modules(modules_context: dict) -> str:
+    """将 module_a~g 结果精简为 LLM 可用的上下文文本。"""
+    summaries = []
+    for key, result in modules_context.items():
+        if result is None or key in ("bid_format", "checklist"):
+            continue
+        if not isinstance(result, dict):
+            continue
+        title = result.get("title", key)
+        sections = result.get("sections", [])
+        section_titles = [s.get("title", "") for s in sections if isinstance(s, dict)]
+        summary_line = f"## {title}"
+        if section_titles:
+            summary_line += f"\n包含: {', '.join(section_titles)}"
+        summaries.append(summary_line)
+    return "\n\n".join(summaries)
+
+
+FALLBACK_PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" / "bid_format_fallback.txt"
+
+
 def extract_bid_format(
     tagged_paragraphs: list[TaggedParagraph],
     settings: dict | None = None,
     embeddings_map: dict[int, list[float]] | None = None,
     module_embedding: list[float] | None = None,
+    modules_context: dict | None = None,
 ) -> dict | None:
-    """提取投标文件格式模板。"""
+    """提取投标文件格式模板（两次调用策略）。
+
+    第一次：判断招标文件是否包含格式样例，有则直接构建。
+    第二次（仅在无样例时）：基于 module_a~g 结果按默认结构构建。
+    """
     filtered = _filter_paragraphs(
         tagged_paragraphs,
         embeddings_map=embeddings_map,
@@ -117,16 +143,29 @@ def extract_bid_format(
 
     logger.info("bid_format: 筛选到 %d 个相关段落 (共 %d)", len(filtered), len(tagged_paragraphs))
 
+    # --- 第一次 LLM 调用：判断 + 构建 ---
+    result = _first_pass(filtered, settings)
+    if result and result.get("has_template") is not False:
+        if "title" not in result:
+            result["title"] = "投标文件格式"
+        return result
+
+    # --- 第二次 LLM 调用：基于模块结果构建 ---
+    logger.info("bid_format: 未检测到格式样例，使用 fallback 构建")
+    return _fallback_pass(modules_context, settings)
+
+
+def _first_pass(filtered: list[TaggedParagraph], settings: dict | None) -> dict | None:
+    """第一次 LLM 调用：判断有无格式样例，有则直接构建。"""
     system_prompt = load_prompt_template(str(PROMPT_PATH))
     input_text = _build_input_text(filtered)
     total_tokens = estimate_tokens(input_text)
-    logger.info("bid_format: 输入文本约 %d tokens", total_tokens)
+    logger.info("bid_format: 第一次调用，输入文本约 %d tokens", total_tokens)
 
     if total_tokens > 120000:
-        logger.info("bid_format: 输入超过 120K tokens，分批处理")
         batches = batch_paragraphs(filtered, max_tokens=120000)
         results = []
-        for i, batch in enumerate(batches):
+        for batch in batches:
             batch_text = _build_input_text(batch)
             messages = build_messages(system=system_prompt, user=batch_text)
             batch_result = call_qwen(messages, settings)
@@ -134,13 +173,22 @@ def extract_bid_format(
                 results.append(batch_result)
         if not results:
             return None
-        result = merge_batch_results(results)
+        return merge_batch_results(results)
     else:
         messages = build_messages(system=system_prompt, user=input_text)
-        result = call_qwen(messages, settings)
+        return call_qwen(messages, settings)
+
+
+def _fallback_pass(modules_context: dict | None, settings: dict | None) -> dict | None:
+    """第二次 LLM 调用：基于 module_a~g 结果按默认结构构建。"""
+    fallback_template = load_prompt_template(str(FALLBACK_PROMPT_PATH))
+    modules_summary = _summarize_modules(modules_context or {})
+    prompt = fallback_template.replace("{modules_summary}", modules_summary)
+    messages = build_messages(system=prompt, user="请根据以上模块信息构建投标文件格式。")
+    result = call_qwen(messages, settings)
 
     if result is None:
-        logger.error("bid_format: LLM 返回 None")
+        logger.error("bid_format: fallback LLM 返回 None")
         return None
 
     if "title" not in result:

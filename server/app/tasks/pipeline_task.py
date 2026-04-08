@@ -13,10 +13,12 @@ from server.app.tasks.celery_app import celery_app
 _sync_db_url = settings.DATABASE_URL.replace("+asyncpg", "")
 _sync_engine = create_engine(_sync_db_url)
 
-_MODULE_KEYS = [
+_PHASE1_KEYS = [
     "module_a", "module_b", "module_c", "module_d", "module_e",
-    "module_f", "module_g", "bid_format", "checklist",
+    "module_f", "module_g",
 ]
+_PHASE2_KEYS = ["bid_format", "checklist"]
+_MODULE_KEYS = _PHASE1_KEYS + _PHASE2_KEYS
 
 
 def _get_task(db: Session, task_id: str):
@@ -107,24 +109,52 @@ def run_pipeline(self, task_id: str):
             task.status = "extracting"
             db.commit()
 
-        # Layer 4: Extract (25-90%) — 并发提取所有模块
+        # Layer 4: Extract (25-90%) — 两阶段提取
         modules_result = {}
         MAX_EXTRACT_WORKERS = 8
 
-        def _extract_module(module_key: str) -> tuple[str, dict | None]:
+        def _extract_module(module_key: str, extra_kwargs: dict | None = None) -> tuple[str, dict | None]:
             try:
-                return module_key, extract_single_module(
-                    module_key, tagged, api_settings,
+                kwargs = dict(
                     embeddings_map=embeddings_map,
                     module_embeddings=module_embeddings,
+                )
+                if extra_kwargs:
+                    kwargs.update(extra_kwargs)
+                return module_key, extract_single_module(
+                    module_key, tagged, api_settings, **kwargs,
                 )
             except Exception as e:
                 return module_key, {"status": "failed", "error": str(e)}
 
+        # Phase 1: module_a~g 并发
         with ThreadPoolExecutor(max_workers=MAX_EXTRACT_WORKERS) as executor:
-            futures = {executor.submit(_extract_module, mk): mk for mk in _MODULE_KEYS}
+            futures = {executor.submit(_extract_module, mk): mk for mk in _PHASE1_KEYS}
             completed = 0
             for future in as_completed(futures):
+                completed += 1
+                module_key, result_data = future.result()
+                modules_result[module_key] = result_data
+                progress = 25 + int(50 * completed / len(_MODULE_KEYS))
+                self.update_state(
+                    state="PROGRESS",
+                    meta={
+                        "step": "extracting",
+                        "detail": f"提取 {module_key} [{completed}/{len(_MODULE_KEYS)}]",
+                        "progress": progress,
+                        "current_module": module_key,
+                        "modules_done": completed,
+                        "modules_total": len(_MODULE_KEYS),
+                    },
+                )
+
+        # Phase 2: bid_format, checklist（bid_format 需要 phase1 结果）
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            phase2_futures = {}
+            for mk in _PHASE2_KEYS:
+                extra = {"modules_context": modules_result} if mk == "bid_format" else None
+                phase2_futures[executor.submit(_extract_module, mk, extra)] = mk
+            for future in as_completed(phase2_futures):
                 completed += 1
                 module_key, result_data = future.result()
                 modules_result[module_key] = result_data
