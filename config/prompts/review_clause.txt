@@ -22,9 +22,13 @@
 {{
   "result": "pass" 或 "fail" 或 "warning",
   "confidence": 0-100 的整数,
-  "reason": "具体判断依据和说明",
-  "locations": [{{"para_index": 段落编号, "text_snippet": "相关原文片段"}}]
+  "reason": "整体判断依据和说明（用于汇总表格）",
+  "locations": [{{"para_index": 段落编号, "text_snippet": "相关原文片段", "reason": "该段落的具体审查说明"}}]
 }}
+
+注意：
+- 顶层 reason 是整体总结，用于审查结果汇总表
+- locations 中每个条目的 reason 是针对该具体段落的审查说明，用于在投标文件中逐段批注
 
 判断标准：
 - pass: 投标文件明确符合该条款要求

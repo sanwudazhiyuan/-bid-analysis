@@ -13,7 +13,7 @@ services:
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U biduser"]
+      test: ["CMD-SHELL", "pg_isready -U biduser -d bid_analyzer"]
       interval: 5s
       retries: 5
 
@@ -51,7 +51,7 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 30s
       retries: 3
 
@@ -82,7 +82,7 @@ services:
     ports:
       - "80:80"
     depends_on:
-      - api
+      api: { condition: service_healthy }
 
 volumes:
   pgdata:

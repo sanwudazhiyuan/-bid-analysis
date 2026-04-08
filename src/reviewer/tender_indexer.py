@@ -99,11 +99,21 @@ class ClauseBatch:
     paragraphs: list  # list[Paragraph]
 
 
+def _normalize_path(path: str) -> str:
+    """归一化 path：去除空格，统一全角/半角标点，用于模糊匹配。"""
+    s = path.replace(" ", "").replace("\u3000", "").strip()
+    # 全角→半角括号、冒号、逗号
+    s = s.replace("（", "(").replace("）", ")")
+    s = s.replace("：", ":").replace("，", ",")
+    return s
+
+
 def find_node_by_path(tender_index: dict, path: str) -> dict | None:
-    """根据 path 精确查找节点（DFS）。"""
+    """根据 path 查找节点（DFS），忽略空格差异。"""
+    target = _normalize_path(path)
     def dfs(nodes):
         for node in nodes:
-            if node.get("path") == path:
+            if _normalize_path(node.get("path", "")) == target:
                 return node
             found = dfs(node.get("children", []))
             if found:
@@ -196,31 +206,41 @@ def paragraphs_to_text(paragraphs: list) -> str:
     return "\n".join(f"[{p.index}] {p.text}" for p in paragraphs)
 
 
-def map_review_location(batch: ClauseBatch, result_location: dict) -> dict:
-    """将批次内段落索引映射回全局段落索引。"""
-    local_idx = result_location.get("para_index", 0)
-    global_idx = local_idx + batch.paragraphs[0].index if batch.paragraphs else local_idx
-    return {
-        "batch_id": batch.batch_id,
-        "path": batch.path,
-        "global_para_index": global_idx,
-        "text_snippet": result_location.get("text_snippet", ""),
-    }
-
-
 def map_batch_indices_to_global(result: dict, batch: ClauseBatch) -> dict:
-    """将 llm_review_clause 返回结果中的批次内索引映射为全局索引。"""
-    mapped_locations = []
+    """校验 LLM 返回的段落索引是否在批次范围内，过滤无效索引。
+
+    paragraphs_to_text 给 LLM 展示的是全局索引 [para.index]，
+    所以 LLM 返回的 para_index 本身就是全局索引，不需要偏移转换。
+    只需校验它是否在当前批次段落范围内。
+    """
+    batch_indices = {p.index for p in batch.paragraphs} if batch.paragraphs else set()
+
+    valid_indices = []
+    snippet = ""
+    per_para_reasons: dict[int, str] = {}
     for loc in result.get("tender_locations", []):
+        # 收集 per-para reasons
+        loc_reasons = loc.get("per_para_reasons", {})
         for pi in loc.get("para_indices", []):
-            mapped = map_review_location(batch, {"para_index": pi, "text_snippet": loc.get("text_snippet", "")})
-            mapped_locations.append(mapped)
+            try:
+                pi = int(pi)
+            except (TypeError, ValueError):
+                continue
+            if pi in batch_indices:
+                valid_indices.append(pi)
+                if pi in loc_reasons:
+                    per_para_reasons[pi] = loc_reasons[pi]
+            else:
+                logger.debug("para_index %d not in batch %s range, skipping", pi, batch.batch_id)
+        if not snippet:
+            snippet = loc.get("text_snippet", "")
 
     result["tender_locations"] = [{
         "batch_id": batch.batch_id,
         "path": batch.path,
-        "global_para_indices": [loc["global_para_index"] for loc in mapped_locations],
-        "text_snippet": mapped_locations[0]["text_snippet"] if mapped_locations else "",
-    }] if mapped_locations else []
+        "global_para_indices": valid_indices,
+        "text_snippet": snippet,
+        "per_para_reasons": per_para_reasons,
+    }] if valid_indices else []
 
     return result

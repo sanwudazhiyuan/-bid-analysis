@@ -82,62 +82,102 @@ def llm_map_clauses_to_chapters(
     return mapping
 
 
-def _build_chapter_tree_text(tender_index: dict) -> str:
-    """将章节树格式化为供 LLM 阅读的缩进文本。"""
+def _build_numbered_chapter_list(tender_index: dict) -> tuple[str, dict[int, str]]:
+    """将章节树格式化为带编号的列表，返回 (文本, {编号: path}) 映射。
+
+    LLM 只需返回编号，避免 path 字符串不匹配的问题。
+    """
     lines: list[str] = []
+    id_to_path: dict[int, str] = {}
+    counter = [0]  # mutable counter for closure
 
     def _walk(nodes: list[dict], depth: int = 0) -> None:
         indent = "  " * depth
         for node in nodes:
+            nid = counter[0]
+            counter[0] += 1
+            id_to_path[nid] = node["path"]
             leaf_tag = ", 叶子" if node.get("is_leaf") else ""
             split_tag = ", 需拆分" if node.get("needs_split") else ""
             lines.append(
-                f"{indent}{node['path']} [段落数: {node.get('para_count', 0)}{leaf_tag}{split_tag}]"
+                f"{indent}[{nid}] {node['title']} [段落数: {node.get('para_count', 0)}{leaf_tag}{split_tag}]"
             )
             _walk(node.get("children", []), depth + 1)
 
     _walk(tender_index.get("chapters", []))
-    return "\n".join(lines)
+    return "\n".join(lines), id_to_path
+
+
+def _map_single_clause(
+    clause: dict,
+    chapter_list_text: str,
+    id_to_path: dict[int, str],
+    prompt_template: str,
+    api_settings: dict | None,
+) -> tuple[int, list[str]]:
+    """映射单个条款到章节节点。返回 (clause_index, [path, ...])。"""
+    prompt = (
+        prompt_template
+        .replace("{clause_index}", str(clause["clause_index"]))
+        .replace("{severity}", clause["severity"])
+        .replace("{clause_text}", clause["clause_text"])
+        .replace("{chapter_tree}", chapter_list_text)
+    )
+
+    messages = build_messages(system="你是招标审查专家。", user=prompt)
+    result = call_qwen(messages, api_settings)
+
+    paths = []
+    raw_ids = []
+    if isinstance(result, dict):
+        raw_ids = result.get("relevant_node_ids", [])
+    elif isinstance(result, list):
+        raw_ids = result
+
+    for rid in raw_ids:
+        if isinstance(rid, int) or (isinstance(rid, str) and rid.isdigit()):
+            real_path = id_to_path.get(int(rid))
+            if real_path:
+                paths.append(real_path)
+            else:
+                logger.warning("Unknown node id %s for clause %d", rid, clause["clause_index"])
+
+    return clause["clause_index"], paths
 
 
 def llm_map_clauses_to_leaf_nodes(
     clauses: list[dict],
     tender_index: dict,
     api_settings: dict | None = None,
+    max_workers: int = 8,
 ) -> dict[int, list[str]]:
-    """Map clauses to leaf node paths. Returns {clause_index: [path, ...]}.
+    """逐条并发映射条款到章节节点。Returns {clause_index: [path, ...]}.
 
-    替代 llm_map_clauses_to_chapters，映射到精确的叶子节点 path 而非章节标题。
+    每个条款独立调用 LLM 映射，比批量映射更准确，通过并发保持效率。
     """
-    chapter_tree_text = _build_chapter_tree_text(tender_index)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    clauses_text = "\n".join(
-        f"[{c['clause_index']}] [{c['severity']}] {c['clause_text']}"
-        for c in clauses
-    )
-
+    chapter_list_text, id_to_path = _build_numbered_chapter_list(tender_index)
     prompt_template = _MAPPING_PROMPT_PATH.read_text(encoding="utf-8")
-    prompt = (
-        prompt_template
-        .replace("{clauses}", clauses_text)
-        .replace("{chapter_tree}", chapter_tree_text)
-    )
-
-    messages = build_messages(system="你是招标审查专家。", user=prompt)
-    result = call_qwen(messages, api_settings)
 
     mapping: dict[int, list[str]] = {}
-    if isinstance(result, list):
-        for item in result:
-            idx = item.get("clause_index")
-            paths = item.get("relevant_paths", [])
-            if idx is not None:
-                mapping[idx] = paths
-    elif isinstance(result, dict) and "mappings" in result:
-        for item in result["mappings"]:
-            idx = item.get("clause_index")
-            paths = item.get("relevant_paths", [])
-            if idx is not None:
-                mapping[idx] = paths
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                _map_single_clause, clause, chapter_list_text,
+                id_to_path, prompt_template, api_settings,
+            ): clause
+            for clause in clauses
+        }
+
+        for future in as_completed(futures):
+            clause = futures[future]
+            try:
+                clause_idx, paths = future.result()
+                if paths:
+                    mapping[clause_idx] = paths
+            except Exception as e:
+                logger.error("Clause mapping failed for %d: %s", clause["clause_index"], e)
 
     return mapping

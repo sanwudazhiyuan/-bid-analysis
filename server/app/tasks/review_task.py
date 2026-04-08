@@ -29,7 +29,10 @@ def run_review(self, review_id: str):
     from src.reviewer.tender_indexer import (
         get_text_for_clause, paragraphs_to_text, map_batch_indices_to_global,
     )
-    from src.reviewer.reviewer import llm_review_clause, compute_summary
+    from src.reviewer.reviewer import (
+        llm_review_clause, llm_review_clause_intermediate,
+        llm_review_clause_final, assemble_multi_batch_result, compute_summary,
+    )
     from src.reviewer.docx_annotator import generate_review_docx
     from src.config import load_settings
 
@@ -63,27 +66,35 @@ def run_review(self, review_id: str):
 
             paragraphs = parse_document(review.tender_file_path)
 
-            # Step 1b: Desensitize PII (2-3%)
+            # Step 1b: Extract images (2-3%)
             review.progress = 2
-            review.current_step = "信息脱敏"
-            db.commit()
-            self.update_state(state="PROGRESS", meta={"step": "indexing", "progress": 2, "detail": "信息脱敏"})
-
-            paragraphs, pii_mapping = desensitize_paragraphs(paragraphs)
-            logger.info("PII desensitization: %d items masked", len(pii_mapping))
-
-            # Step 1c: Extract images (3-5%)
-            review.progress = 3
             review.current_step = "提取图片"
             db.commit()
-            self.update_state(state="PROGRESS", meta={"step": "indexing", "progress": 3, "detail": "提取图片"})
+            self.update_state(state="PROGRESS", meta={"step": "indexing", "progress": 2, "detail": "提取图片"})
 
             import os
             images_dir = os.path.join(os.path.dirname(review.tender_file_path), "images")
             extracted_images = extract_images(review.tender_file_path, images_dir)
             logger.info("Extracted %d images from tender document", len(extracted_images))
 
-            # Inject image markers into paragraphs for LLM awareness
+            # Step 2: Build index on CLEAN paragraphs (5-10%)
+            # 必须在脱敏和图片标记注入之前建索引，避免标题文本被污染
+            review.progress = 5
+            review.current_step = "构建索引"
+            db.commit()
+            self.update_state(state="PROGRESS", meta={"step": "indexing", "progress": 5, "detail": "构建索引"})
+
+            tender_index = build_tender_index(paragraphs, api_settings)
+
+            # Step 2b: Desensitize PII AFTER index is built
+            review.current_step = "信息脱敏"
+            db.commit()
+            self.update_state(state="PROGRESS", meta={"step": "indexing", "progress": 7, "detail": "信息脱敏"})
+
+            paragraphs, pii_mapping = desensitize_paragraphs(paragraphs)
+            logger.info("PII desensitization: %d items masked", len(pii_mapping))
+
+            # Inject image markers AFTER index is built
             index_to_pos = {p.index: pos for pos, p in enumerate(paragraphs)}
 
             image_by_para = {}
@@ -101,14 +112,6 @@ def run_review(self, review_id: str):
                         paragraphs[pos],
                         text=paragraphs[pos].text + f" {marker}",
                     )
-
-            # Step 2: Build index (5-10%)
-            review.progress = 5
-            review.current_step = "构建索引"
-            db.commit()
-            self.update_state(state="PROGRESS", meta={"step": "indexing", "progress": 5, "detail": "构建索引"})
-
-            tender_index = build_tender_index(paragraphs, api_settings)
             logger.info(
                 "Tender index built: source=%s, confidence=%.2f, chapters=%d",
                 tender_index.get("toc_source"), tender_index.get("confidence", 0),
@@ -123,7 +126,8 @@ def run_review(self, review_id: str):
             db.commit()
             self.update_state(state="PROGRESS", meta={"step": "extracting", "progress": 10, "detail": "提取条款"})
 
-            clauses = extract_review_clauses(extracted_data)
+            bid_tagged_paragraphs = _load_bid_tagged_paragraphs(bid_task)
+            clauses = extract_review_clauses(extracted_data, tagged_paragraphs=bid_tagged_paragraphs)
             project_context = extract_project_context(extracted_data)
 
             if not clauses:
@@ -138,11 +142,16 @@ def run_review(self, review_id: str):
             self.update_state(state="PROGRESS", meta={"step": "extracting", "progress": 12, "detail": "条款映射"})
             clause_mapping = llm_map_clauses_to_leaf_nodes(clauses, tender_index, api_settings)
 
-            # Step 5-7: 逐条独立审查 (15-95%)
-            _SEVERITY_ORDER = {"fail": 0, "error": 1, "warning": 2, "pass": 3}
+            # 构建 image_map: filename → file_path，用于多模态审查
+            image_map = {}
+            for img in extracted_images:
+                if img.get("path") and img.get("filename"):
+                    image_map[img["filename"]] = img["path"]
+            if image_map:
+                logger.info("Image map built: %d images available for multimodal review", len(image_map))
 
-            def _is_worse(a: dict, b: dict) -> bool:
-                return _SEVERITY_ORDER.get(a.get("result", ""), 99) < _SEVERITY_ORDER.get(b.get("result", ""), 99)
+            # Step 5-7: 并发审查 (15-95%)
+            from concurrent.futures import ThreadPoolExecutor, as_completed
 
             def _no_match_item(clause: dict) -> dict:
                 return {
@@ -156,93 +165,140 @@ def run_review(self, review_id: str):
                     "tender_locations": [],
                 }
 
-            review_items = []
-            item_id = 0
-            all_clauses = sorted(clauses, key=lambda c: {"critical": 0, "major": 1, "minor": 2}.get(c["severity"], 9))
-            clause_progress_start = 15
-            clause_progress_end = 95
-
-            for i, clause in enumerate(all_clauses):
-                progress = clause_progress_start + int(
-                    (clause_progress_end - clause_progress_start) * i / max(len(all_clauses), 1)
-                )
-                step_key = (
-                    "p0_review" if clause["severity"] == "critical" else
-                    "p1_review" if clause["severity"] == "major" else "p2_review"
-                )
-                review.progress = progress
-                review.current_step = f"审查 [{i+1}/{len(all_clauses)}] {clause['clause_text'][:20]}..."
-                db.commit()
-                self.update_state(state="PROGRESS", meta={
-                    "step": step_key, "progress": progress,
-                    "detail": review.current_step,
-                })
-
+            def _review_single_clause(clause: dict) -> dict:
+                """审查单个条款（在线程池中执行）。"""
                 paths = clause_mapping.get(clause["clause_index"], [])
                 if not paths:
-                    item = _no_match_item(clause)
-                    item["id"] = item_id
-                    review_items.append(item)
-                    item_id += 1
-                    continue
+                    return _no_match_item(clause)
 
                 batches = get_text_for_clause(
                     clause["clause_index"], paths, tender_index, paragraphs
                 )
-
                 if not batches:
-                    item = _no_match_item(clause)
-                    item["id"] = item_id
-                    review_items.append(item)
-                    item_id += 1
-                    continue
+                    return _no_match_item(clause)
 
                 if len(batches) == 1:
                     batch = batches[0]
                     tender_text = paragraphs_to_text(batch.paragraphs)
                     try:
-                        result = llm_review_clause(clause, tender_text, project_context, api_settings)
-                        result = map_batch_indices_to_global(result, batch)
-                        result["id"] = item_id
-                        review_items.append(result)
+                        result = llm_review_clause(clause, tender_text, project_context, api_settings, image_map=image_map)
+                        return map_batch_indices_to_global(result, batch)
                     except Exception as e:
                         logger.error("Clause review failed for %d: %s", clause["clause_index"], e)
-                        review_items.append({
-                            "id": item_id, "source_module": clause["source_module"],
-                            "clause_index": clause["clause_index"], "clause_text": clause["clause_text"],
-                            "result": "error", "confidence": 0, "reason": f"LLM 调用失败: {e}",
-                            "severity": clause["severity"], "tender_locations": [],
-                        })
-                else:
-                    # 多批次：各批次独立审查，取最严格结果但合并所有位置信息
-                    best_result = None
-                    all_locations = []
-                    for batch in batches:
-                        tender_text = paragraphs_to_text(batch.paragraphs)
-                        try:
-                            r = llm_review_clause(clause, tender_text, project_context, api_settings)
-                            r = map_batch_indices_to_global(r, batch)
-                            all_locations.extend(r.get("tender_locations", []))
-                            if best_result is None or _is_worse(r, best_result):
-                                best_result = r
-                        except Exception as e:
-                            logger.error("Clause batch review failed for %s: %s", batch.batch_id, e)
-                    if best_result is None:
-                        best_result = {
+                        return {
                             "source_module": clause["source_module"],
                             "clause_index": clause["clause_index"],
                             "clause_text": clause["clause_text"],
                             "result": "error", "confidence": 0,
-                            "reason": "所有批次 LLM 调用失败",
+                            "reason": f"LLM 调用失败: {e}",
                             "severity": clause["severity"], "tender_locations": [],
                         }
-                    else:
-                        # 合并所有批次的位置信息
-                        best_result["tender_locations"] = all_locations
-                    best_result["id"] = item_id
-                    review_items.append(best_result)
+                else:
+                    # 顺序累积审查：逐批次传递摘要，末批次综合判定
+                    accumulated_summary = ""
+                    all_candidates = []
 
-                item_id += 1
+                    for i, batch in enumerate(batches):
+                        tender_text = paragraphs_to_text(batch.paragraphs)
+                        is_last = (i == len(batches) - 1)
+
+                        if is_last:
+                            try:
+                                result = llm_review_clause_final(
+                                    clause, tender_text, project_context,
+                                    accumulated_summary, all_candidates,
+                                    api_settings, image_map=image_map,
+                                )
+                                # 校验末批次 locations 的索引
+                                batch_indices = {p.index for p in batch.paragraphs}
+                                validated_locations = []
+                                for loc in result.get("locations", []):
+                                    pi = loc.get("para_index")
+                                    if pi is not None and int(pi) in batch_indices:
+                                        validated_locations.append(loc)
+                                result["locations"] = validated_locations
+                                return assemble_multi_batch_result(result, all_candidates)
+                            except Exception as e:
+                                logger.error("Clause final review failed for %d: %s", clause["clause_index"], e)
+                                return {
+                                    "source_module": clause["source_module"],
+                                    "clause_index": clause["clause_index"],
+                                    "clause_text": clause["clause_text"],
+                                    "result": "error", "confidence": 0,
+                                    "reason": f"LLM 调用失败: {e}",
+                                    "severity": clause["severity"], "tender_locations": [],
+                                }
+                        else:
+                            try:
+                                intermediate = llm_review_clause_intermediate(
+                                    clause, tender_text, project_context,
+                                    prev_summary=accumulated_summary,
+                                    prev_candidates=all_candidates if all_candidates else None,
+                                    api_settings=api_settings,
+                                    image_map=image_map,
+                                )
+                                # 校验候选索引是否在当前批次范围内
+                                batch_indices = {p.index for p in batch.paragraphs}
+                                valid_candidates = [
+                                    c for c in intermediate.get("candidates", [])
+                                    if c.get("para_index") is not None and int(c["para_index"]) in batch_indices
+                                ]
+                                all_candidates.extend(valid_candidates)
+                                accumulated_summary = intermediate.get("summary", accumulated_summary)
+                            except Exception as e:
+                                logger.error("Clause intermediate review failed for batch %s: %s", batch.batch_id, e)
+                                # 中间批次失败不致命，继续下一批次
+                                accumulated_summary += f"\n批次{batch.batch_id}审查失败: {e}"
+
+            all_clauses = sorted(clauses, key=lambda c: {"critical": 0, "major": 1, "minor": 2}.get(c["severity"], 9))
+            clause_progress_start = 15
+            clause_progress_end = 95
+
+            # 并发提交所有条款审查（最多 5 个并发，避免 API 限流）
+            MAX_WORKERS = 8
+            results_by_index: dict[int, dict] = {}
+            futures = {}
+
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                for clause in all_clauses:
+                    future = executor.submit(_review_single_clause, clause)
+                    futures[future] = clause
+
+                completed = 0
+                for future in as_completed(futures):
+                    clause = futures[future]
+                    completed += 1
+                    progress = clause_progress_start + int(
+                        (clause_progress_end - clause_progress_start) * completed / max(len(all_clauses), 1)
+                    )
+                    review.progress = progress
+                    review.current_step = f"审查 [{completed}/{len(all_clauses)}]"
+                    db.commit()
+                    self.update_state(state="PROGRESS", meta={
+                        "step": "reviewing", "progress": progress,
+                        "detail": review.current_step,
+                    })
+
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        logger.error("Unexpected error reviewing clause %d: %s", clause["clause_index"], e)
+                        result = {
+                            "source_module": clause["source_module"],
+                            "clause_index": clause["clause_index"],
+                            "clause_text": clause["clause_text"],
+                            "result": "error", "confidence": 0,
+                            "reason": f"审查异常: {e}",
+                            "severity": clause["severity"], "tender_locations": [],
+                        }
+                    results_by_index[clause["clause_index"]] = result
+
+            # 按原始顺序组装结果
+            review_items = []
+            for item_id, clause in enumerate(all_clauses):
+                result = results_by_index.get(clause["clause_index"], _no_match_item(clause))
+                result["id"] = item_id
+                review_items.append(result)
 
             # Step 8: Generate docx (95-100%)
             review.progress = 95
@@ -318,3 +374,31 @@ def _ensure_bid_complete(bid_task, db: Session):
             db.commit()
 
     raise TimeoutError("等待招标文件解析超时（30分钟）")
+
+
+def _load_bid_tagged_paragraphs(bid_task) -> list:
+    """从招标解读的索引结果中加载 tagged_paragraphs。"""
+    import json
+    from src.models import TaggedParagraph
+
+    indexed_path = bid_task.indexed_path
+    if not indexed_path:
+        return []
+    try:
+        with open(indexed_path, "r", encoding="utf-8") as f:
+            indexed_data = json.load(f)
+        raw_paragraphs = indexed_data.get("tagged_paragraphs", [])
+        return [
+            TaggedParagraph(
+                index=p["index"],
+                text=p["text"],
+                section_title=p.get("section_title"),
+                section_level=p.get("section_level", 0),
+                tags=p.get("tags", []),
+                table_data=p.get("table_data"),
+            )
+            for p in raw_paragraphs
+        ]
+    except Exception:
+        logger.warning("Failed to load bid tagged_paragraphs from %s", indexed_path, exc_info=True)
+        return []

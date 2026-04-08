@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onUnmounted, watch } from 'vue'
+import { onMounted, onUnmounted, watch } from 'vue'
 import { useReviewStore } from '../stores/reviewStore'
 import { useSSE } from '../composables/useSSE'
 import ReviewUploadStage from '../components/ReviewUploadStage.vue'
@@ -11,11 +11,16 @@ const store = useReviewStore()
 const reviewSteps = [
   { key: 'indexing', label: '索引' },
   { key: 'extracting', label: '条款提取' },
-  { key: 'p0_review', label: '废标审查' },
-  { key: 'p1_review', label: '资格审查' },
-  { key: 'p2_review', label: '评分审查' },
+  { key: 'reviewing', label: '审查' },
   { key: 'generating', label: '生成报告' },
 ]
+
+// Restore state on page refresh if there's an active review
+onMounted(async () => {
+  if (store.currentReviewId && store.stage === 'upload') {
+    await store.loadReviewState()
+  }
+})
 
 let sseInstance: ReturnType<typeof useSSE> | null = null
 

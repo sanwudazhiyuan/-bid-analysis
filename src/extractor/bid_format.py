@@ -28,7 +28,11 @@ _RELEVANT_SECTION_KEYWORDS = [
 ]
 
 
-def _filter_paragraphs(tagged_paragraphs: list[TaggedParagraph]) -> list[TaggedParagraph]:
+def _filter_paragraphs(
+    tagged_paragraphs: list[TaggedParagraph],
+    embeddings_map: dict[int, list[float]] | None = None,
+    module_embedding: list[float] | None = None,
+) -> list[TaggedParagraph]:
     """筛选与投标文件格式模板相关的段落。
 
     投标文件格式通常在文档后半部分（附件/最后一章）。
@@ -62,6 +66,17 @@ def _filter_paragraphs(tagged_paragraphs: list[TaggedParagraph]) -> list[TaggedP
             selected_indices.add(tp.index)
             continue
 
+    # 向量语义匹配补漏
+    if embeddings_map and module_embedding:
+        from src.extractor.embedding import filter_by_similarity
+        extra = filter_by_similarity(
+            tagged_paragraphs, embeddings_map, module_embedding,
+            exclude_indices=selected_indices,
+        )
+        for tp in extra:
+            selected.append(tp)
+            selected_indices.add(tp.index)
+
     # 投标文件格式通常在文档后半部分，如果筛选太少则补充后部段落
     if len(selected) < 10 and len(tagged_paragraphs) > 0:
         tail_start = max(int(len(tagged_paragraphs) * 0.6), 0)
@@ -87,9 +102,15 @@ def _build_input_text(paragraphs: list[TaggedParagraph]) -> str:
 def extract_bid_format(
     tagged_paragraphs: list[TaggedParagraph],
     settings: dict | None = None,
+    embeddings_map: dict[int, list[float]] | None = None,
+    module_embedding: list[float] | None = None,
 ) -> dict | None:
     """提取投标文件格式模板。"""
-    filtered = _filter_paragraphs(tagged_paragraphs)
+    filtered = _filter_paragraphs(
+        tagged_paragraphs,
+        embeddings_map=embeddings_map,
+        module_embedding=module_embedding,
+    )
     if not filtered:
         logger.warning("bid_format: 未筛选到相关段落")
         return None

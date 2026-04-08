@@ -68,10 +68,10 @@ def _add_summary_section(doc: Document, review_items: list[dict], summary: dict,
     for idx, item in enumerate(review_items):
         row = table.add_row()
         row.cells[0].text = str(idx + 1)
-        row.cells[1].text = item.get("clause_text", "")[:50]
+        row.cells[1].text = item.get("clause_text", "")
         row.cells[2].text = _result_symbol(item.get("result", ""))
         row.cells[3].text = f"{item.get('confidence', 0)}%"
-        row.cells[4].text = item.get("reason", "")[:80]
+        row.cells[4].text = item.get("reason", "")
         for cell in row.cells:
             for paragraph in cell.paragraphs:
                 for run in paragraph.runs:
@@ -163,28 +163,28 @@ def _highlight_paragraph(para, color: str = "yellow"):
         highlight.set(qn("w:val"), color)
 
 
-def _build_para_review_map(review_items: list[dict]) -> dict[int, list[dict]]:
-    """建立全局段落索引 → 相关 review_items 的映射。
+def _build_para_review_map(review_items: list[dict]) -> dict[int, list[tuple[dict, str]]]:
+    """建立全局段落索引 → (review_item, per_para_reason) 的映射。
 
     兼容新旧两种格式：
-    - 新格式: tender_locations[].global_para_indices
+    - 新格式: tender_locations[].global_para_indices + per_para_reasons
     - 旧格式: tender_locations[].para_indices
     """
-    para_map: dict[int, list[dict]] = {}
+    para_map: dict[int, list[tuple[dict, str]]] = {}
     for item in review_items:
         if item["result"] not in ("fail", "warning"):
             continue
-        seen_paras: set[int] = set()  # 同一 item 同一 para 只记录一次
+        seen_paras: set[int] = set()
         for loc in item.get("tender_locations", []):
-            # 新格式
             indices = loc.get("global_para_indices", [])
-            # 旧格式 fallback
             if not indices:
                 indices = loc.get("para_indices", [])
+            per_para_reasons = loc.get("per_para_reasons", {})
             for pi in indices:
                 if pi not in seen_paras:
                     seen_paras.add(pi)
-                    para_map.setdefault(pi, []).append(item)
+                    reason = per_para_reasons.get(pi, "") or per_para_reasons.get(str(pi), "")
+                    para_map.setdefault(pi, []).append((item, reason))
     return para_map
 
 
@@ -208,35 +208,50 @@ def generate_review_docx(
     # Add comments
     comment_mgr = _CommentManager(doc)
 
-    # Get all paragraph elements from body
+    # Get all body-level elements (paragraphs + tables) to match parser indexing
     from docx.oxml.ns import qn
     body = doc.element.body
-    para_elements = body.findall(qn("w:p"))
 
     para_idx = 0
-    for pe in para_elements:
-        if para_idx in para_review_map:
-            items = para_review_map[para_idx]
-            # Highlight
-            highlight_color = "red" if any(i["result"] == "fail" for i in items) else "yellow"
-            _highlight_paragraph(pe, highlight_color)
-            # Add comment for each item
-            for item in items:
-                severity_label = {"critical": "废标条款", "major": "资格/编制要求", "minor": "评标标准"}.get(
-                    item["severity"], "审查项"
-                )
-                result_label = {"pass": "合规", "fail": "不合规", "warning": "需注意", "error": "错误"}.get(
-                    item["result"], item["result"]
-                )
-                comment_text = (
-                    f"[{severity_label} #{item.get('clause_index', '')}] "
-                    f"置信度: {item.get('confidence', 0)}%\n"
-                    f"判定: {_result_symbol(item['result'])} {result_label}\n"
-                    f"条款: {item.get('clause_text', '')}\n"
-                    f"原因: {item.get('reason', '')}"
-                )
-                comment_mgr.add_comment(pe, comment_text)
-        para_idx += 1
+    for element in body:
+        tag = element.tag
+        if tag == qn("w:p"):
+            # 与 docx_parser 保持一致：跳过空段落
+            runs_text = []
+            for r in element.findall(qn("w:r")):
+                t = r.find(qn("w:t"))
+                if t is not None and t.text:
+                    runs_text.append(t.text)
+            text = "".join(runs_text).strip()
+            if not text:
+                continue  # 空段落不计入索引
+
+            if para_idx in para_review_map:
+                entries = para_review_map[para_idx]
+                highlight_color = "red" if any(item["result"] == "fail" for item, _ in entries) else "yellow"
+                _highlight_paragraph(element, highlight_color)
+                for item, per_para_reason in entries:
+                    severity_label = {"critical": "废标条款", "major": "资格/编制要求", "minor": "评标标准"}.get(
+                        item["severity"], "审查项"
+                    )
+                    result_label = {"pass": "合规", "fail": "不合规", "warning": "需注意", "error": "错误"}.get(
+                        item["result"], item["result"]
+                    )
+                    # 优先使用该段落的独立 reason，fallback 到整体 reason
+                    display_reason = per_para_reason or item.get("reason", "")
+                    comment_text = (
+                        f"[{severity_label} #{item.get('clause_index', '')}] "
+                        f"置信度: {item.get('confidence', 0)}%\n"
+                        f"判定: {_result_symbol(item['result'])} {result_label}\n"
+                        f"条款: {item.get('clause_text', '')}\n"
+                        f"原因: {display_reason}"
+                    )
+                    comment_mgr.add_comment(element, comment_text)
+            para_idx += 1
+        elif tag == qn("w:tbl"):
+            # 表格作为一个段落计数（与 docx_parser 一致）
+            # 表格不支持高亮/批注，但仍然需要递增索引
+            para_idx += 1
 
     # Insert summary at beginning: build in main doc, then move to front
     original_count = len(list(body))

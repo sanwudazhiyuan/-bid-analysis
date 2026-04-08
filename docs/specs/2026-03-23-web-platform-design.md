@@ -34,21 +34,23 @@
 
 ## 2. 技术栈
 
-| 层级 | 技术 | 版本 |
-|------|------|------|
-| 后端框架 | FastAPI | 0.110+ |
-| 任务队列 | Celery | 5.3+ |
-| 消息中间件 | Redis | 7+ |
-| 数据库 | PostgreSQL | 16+ |
-| ORM | SQLAlchemy 2.0 + Alembic | |
-| 前端框架 | Vue 3 (Composition API) | 3.4+ |
-| 前端构建 | Vite | 5+ |
-| UI 样式 | Tailwind CSS | 3.4+ |
-| 状态管理 | Pinia | 2.1+ |
-| HTTP 客户端 | Axios | |
-| 实时通信 | SSE (Server-Sent Events) | |
-| 反向代理 | Nginx | |
-| 容器化 | Docker + docker-compose | |
+
+| 层级       | 技术                       | 版本     |
+| -------- | ------------------------ | ------ |
+| 后端框架     | FastAPI                  | 0.110+ |
+| 任务队列     | Celery                   | 5.3+   |
+| 消息中间件    | Redis                    | 7+     |
+| 数据库      | PostgreSQL               | 16+    |
+| ORM      | SQLAlchemy 2.0 + Alembic |        |
+| 前端框架     | Vue 3 (Composition API)  | 3.4+   |
+| 前端构建     | Vite                     | 5+     |
+| UI 样式    | Tailwind CSS             | 3.4+   |
+| 状态管理     | Pinia                    | 2.1+   |
+| HTTP 客户端 | Axios                    |        |
+| 实时通信     | SSE (Server-Sent Events) |        |
+| 反向代理     | Nginx                    |        |
+| 容器化      | Docker + docker-compose  |        |
+
 
 ---
 
@@ -114,10 +116,10 @@ Docker 中挂载为 volume，数据持久化。
 
 ## 4. 数据库设计
 
-### 4.1 核心表
+### 1 核心表
 
 ```sql
--- 用户表
+-- 用户表4.
 CREATE TABLE users (
     id            SERIAL PRIMARY KEY,
     username      VARCHAR(50) UNIQUE NOT NULL,
@@ -199,11 +201,13 @@ CREATE INDEX idx_annotations_module_section ON annotations(module_key, section_i
 
 ### 5.1 认证
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/auth/login` | 登录，返回 JWT token |
-| POST | `/api/auth/logout` | 登出 |
-| GET  | `/api/auth/me` | 获取当前用户信息 |
+
+| 方法   | 路径                 | 说明              |
+| ---- | ------------------ | --------------- |
+| POST | `/api/auth/login`  | 登录，返回 JWT token |
+| POST | `/api/auth/logout` | 登出              |
+| GET  | `/api/auth/me`     | 获取当前用户信息        |
+
 
 认证方式：JWT Bearer Token（Authorization header），access_token 有效期 24h，refresh_token 有效期 7 天。refresh_token 用于无感续期，前端在 access_token 过期前自动调用刷新。
 
@@ -211,42 +215,50 @@ CREATE INDEX idx_annotations_module_section ON annotations(module_key, section_i
 
 ### 5.2 任务管理
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/tasks` | 上传文件并创建分析任务 |
-| GET  | `/api/tasks` | 获取任务列表（支持分页、状态筛选） |
-| GET  | `/api/tasks/{id}` | 获取任务详情 |
-| DELETE | `/api/tasks/{id}` | 删除任务及相关文件 |
-| GET  | `/api/tasks/{id}/progress` | **SSE 端点**：实时进度推送 |
+
+| 方法     | 路径                         | 说明                |
+| ------ | -------------------------- | ----------------- |
+| POST   | `/api/tasks`               | 上传文件并创建分析任务       |
+| GET    | `/api/tasks`               | 获取任务列表（支持分页、状态筛选） |
+| GET    | `/api/tasks/{id}`          | 获取任务详情            |
+| DELETE | `/api/tasks/{id}`          | 删除任务及相关文件         |
+| GET    | `/api/tasks/{id}/progress` | **SSE 端点**：实时进度推送 |
+
 
 ### 5.3 预览与标注
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET  | `/api/tasks/{id}/preview` | 获取提取结果 JSON（前端渲染为交互表格） |
-| PUT  | `/api/tasks/{id}/preview/checkbox` | 更新勾选状态 |
-| POST | `/api/tasks/{id}/annotations` | 创建标注（行级/section级） |
-| GET  | `/api/tasks/{id}/annotations` | 获取所有标注 |
-| PUT  | `/api/tasks/{id}/annotations/{ann_id}` | 修改标注内容 |
-| DELETE | `/api/tasks/{id}/annotations/{ann_id}` | 删除标注 |
-| POST | `/api/tasks/{id}/reextract` | 提交标注后触发 LLM 重新提取，返回 `{celery_task_id}` |
-| GET  | `/api/tasks/{id}/reextract/{celery_task_id}/progress` | **SSE 端点**：重提取任务进度 |
+
+| 方法     | 路径                                                    | 说明                                     |
+| ------ | ----------------------------------------------------- | -------------------------------------- |
+| GET    | `/api/tasks/{id}/preview`                             | 获取提取结果 JSON（前端渲染为交互表格）                 |
+| PUT    | `/api/tasks/{id}/preview/checkbox`                    | 更新勾选状态                                 |
+| POST   | `/api/tasks/{id}/annotations`                         | 创建标注（行级/section级）                      |
+| GET    | `/api/tasks/{id}/annotations`                         | 获取所有标注                                 |
+| PUT    | `/api/tasks/{id}/annotations/{ann_id}`                | 修改标注内容                                 |
+| DELETE | `/api/tasks/{id}/annotations/{ann_id}`                | 删除标注                                   |
+| POST   | `/api/tasks/{id}/reextract`                           | 提交标注后触发 LLM 重新提取，返回 `{celery_task_id}` |
+| GET    | `/api/tasks/{id}/reextract/{celery_task_id}/progress` | **SSE 端点**：重提取任务进度                     |
+
 
 ### 5.4 文件下载
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
+
+| 方法   | 路径                                | 说明                                  |
+| ---- | --------------------------------- | ----------------------------------- |
 | GET  | `/api/tasks/{id}/download/{type}` | 下载文件（type: report/format/checklist） |
-| POST | `/api/tasks/{id}/regenerate` | 根据最新数据重新生成 .docx |
+| POST | `/api/tasks/{id}/regenerate`      | 根据最新数据重新生成 .docx                    |
+
 
 ### 5.5 用户管理（仅 admin）
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET  | `/api/users` | 用户列表 |
-| POST | `/api/users` | 创建用户 |
-| PUT  | `/api/users/{id}` | 修改用户 |
+
+| 方法     | 路径                | 说明   |
+| ------ | ----------------- | ---- |
+| GET    | `/api/users`      | 用户列表 |
+| POST   | `/api/users`      | 创建用户 |
+| PUT    | `/api/users/{id}` | 修改用户 |
 | DELETE | `/api/users/{id}` | 删除用户 |
+
 
 ---
 
@@ -753,13 +765,15 @@ docker-compose exec api python -m server.app.scripts.create_admin
 
 ### 12.1 需要修改的文件
 
-| 文件 | 改动 | 原因 |
-|------|------|------|
-| `src/extractor/extractor.py` | 添加 `extract_single_module(module_key, paragraphs, index_result)` 包装函数 | CLI 的 `cmd_extract` 已能按模块提取（通过 `_MODULE_REGISTRY`），此函数是干净的 API 包装，供 Celery Worker 和重提取任务调用 |
-| `src/extractor/base.py` | 添加 `reextract_with_annotations()` | 支持带标注上下文的重提取 |
-| `src/logger.py` | 添加回调支持 | 允许 Celery Worker 捕获日志进度 |
 
-**`reextract_with_annotations()` 函数契约：**
+| 文件                           | 改动                                                                    | 原因                                                                                         |
+| ---------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `src/extractor/extractor.py` | 添加 `extract_single_module(module_key, paragraphs, index_result)` 包装函数 | CLI 的 `cmd_extract` 已能按模块提取（通过 `_MODULE_REGISTRY`），此函数是干净的 API 包装，供 Celery Worker 和重提取任务调用 |
+| `src/extractor/base.py`      | 添加 `reextract_with_annotations()`                                     | 支持带标注上下文的重提取                                                                               |
+| `src/logger.py`              | 添加回调支持                                                                | 允许 Celery Worker 捕获日志进度                                                                    |
+
+
+`**reextract_with_annotations()` 函数契约：**
 
 ```python
 def reextract_with_annotations(
@@ -807,22 +821,27 @@ def reextract_with_annotations(
 
 ## 14. 测试策略
 
-| 层级 | 范围 | 工具 |
-|------|------|------|
-| 后端单元测试 | API 路由、服务层、Celery 任务 | pytest + httpx (AsyncClient) |
-| 前端单元测试 | 组件渲染、Store 逻辑 | Vitest + Vue Test Utils |
-| 集成测试 | API → DB → Celery 流程 | pytest + testcontainers (PostgreSQL, Redis) |
-| E2E 测试 | 全流程（上传→分析→预览→下载） | Playwright |
+
+| 层级     | 范围                   | 工具                                          |
+| ------ | -------------------- | ------------------------------------------- |
+| 后端单元测试 | API 路由、服务层、Celery 任务 | pytest + httpx (AsyncClient)                |
+| 前端单元测试 | 组件渲染、Store 逻辑        | Vitest + Vue Test Utils                     |
+| 集成测试   | API → DB → Celery 流程 | pytest + testcontainers (PostgreSQL, Redis) |
+| E2E 测试 | 全流程（上传→分析→预览→下载）     | Playwright                                  |
+
 
 ---
 
 ## 15. 实施阶段划分
 
-| Phase | 内容 | 预估工作量 |
-|-------|------|-----------|
-| **Phase 1** | 项目骨架：Docker + FastAPI + PostgreSQL + Vue + 认证 | 基础 |
-| **Phase 2** | 文件上传 + Celery 管线任务 + 进度推送 | 核心 |
-| **Phase 3** | 任务列表 + 历史管理 + 文件下载 | 基础 |
-| **Phase 4** | 交互式预览（表格渲染 + 勾选） | 核心 |
-| **Phase 5** | 标注系统 + LLM 重提取 | 核心 |
-| **Phase 6** | 用户管理 + 安全加固 + 部署优化 | 收尾 |
+
+| Phase       | 内容                                            | 预估工作量 |
+| ----------- | --------------------------------------------- | ----- |
+| **Phase 1** | 项目骨架：Docker + FastAPI + PostgreSQL + Vue + 认证 | 基础    |
+| **Phase 2** | 文件上传 + Celery 管线任务 + 进度推送                     | 核心    |
+| **Phase 3** | 任务列表 + 历史管理 + 文件下载                            | 基础    |
+| **Phase 4** | 交互式预览（表格渲染 + 勾选）                              | 核心    |
+| **Phase 5** | 标注系统 + LLM 重提取                                | 核心    |
+| **Phase 6** | 用户管理 + 安全加固 + 部署优化                            | 收尾    |
+
+

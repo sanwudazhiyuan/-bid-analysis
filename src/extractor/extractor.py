@@ -24,6 +24,8 @@ _MODULE_REGISTRY = {
 def extract_all(
     tagged_paragraphs: list[TaggedParagraph],
     settings: dict | None = None,
+    embeddings_map: dict[int, list[float]] | None = None,
+    module_embeddings: dict[str, list[float]] | None = None,
 ) -> dict:
     """依次调用全部 9 个提取模块，汇总结果。
 
@@ -47,7 +49,12 @@ def extract_all(
         try:
             mod = importlib.import_module(module_path)
             func = getattr(mod, func_name)
-            result = func(tagged_paragraphs, settings)
+            module_emb = module_embeddings.get(key) if module_embeddings else None
+            result = func(
+                tagged_paragraphs, settings,
+                embeddings_map=embeddings_map,
+                module_embedding=module_emb,
+            )
             modules[key] = result
             status = "成功" if result is not None else "返回 None"
             logger.info("模块 %s: %s", key, status)
@@ -66,6 +73,8 @@ def extract_single_module(
     module_key: str,
     tagged_paragraphs: list[TaggedParagraph],
     settings: dict | None = None,
+    embeddings_map: dict[int, list[float]] | None = None,
+    module_embeddings: dict[str, list[float]] | None = None,
 ) -> dict | None:
     """提取单个模块，供 Web Celery Worker 调用。"""
     if module_key not in _MODULE_REGISTRY:
@@ -73,4 +82,9 @@ def extract_single_module(
     mod_path, func_name = _MODULE_REGISTRY[module_key]
     mod = importlib.import_module(mod_path)
     func = getattr(mod, func_name)
-    return func(tagged_paragraphs, settings)
+    module_emb = module_embeddings.get(module_key) if module_embeddings else None
+    return func(
+        tagged_paragraphs, settings,
+        embeddings_map=embeddings_map,
+        module_embedding=module_emb,
+    )

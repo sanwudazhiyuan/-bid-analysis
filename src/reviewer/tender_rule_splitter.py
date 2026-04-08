@@ -20,7 +20,13 @@ logger = logging.getLogger(__name__)
 
 # ========== TOC 正则 ==========
 _TOC_LINE_RE = re.compile(
-    r"^(第[一二三四五六七八九十百\d]+[章节篇]|[\d]+(?:\.[\d]+)*)\s*"
+    r"^(第[一二三四五六七八九十百\d]+[章节篇部]"      # 第X章/节/篇/部
+    r"|第[一二三四五六七八九十百\d]+部分"              # 第X部分
+    r"|[一二三四五六七八九十]+[、．.]"                 # 一、/ 二、
+    r"|（[一二三四五六七八九十]+）"                    # （一）/（二）
+    r"|\([一二三四五六七八九十]+\)"                   # (一)/(二)
+    r"|[\d]+(?:\.[\d]+)*"                            # 6.1 / 6.2.1
+    r")\s*"
     r"(.+?)"
     r"[\s.…·\-_]*(\d+)?\s*$"
 )
@@ -64,11 +70,34 @@ _MAX_HEADING_LEN = 80
 def _parse_toc_level(prefix: str) -> int:
     if prefix.startswith("第"):
         return 1
+    # 一、二、三、 → level 1
+    if re.match(r"^[一二三四五六七八九十]+[、．.]$", prefix):
+        return 1
+    # （一）/(一) → level 2
+    if re.match(r"^[（(][一二三四五六七八九十]+[）)]$", prefix):
+        return 2
     return prefix.count(".") + 1 if "." in prefix else 1
 
 
 def _has_toc_style(para: Paragraph) -> bool:
-    return bool(para.style and ("toc" in para.style.lower() or "目录" in para.style.lower()))
+    if not para.style:
+        return False
+    s = para.style.lower()
+    return "toc" in s or "目录" in s
+
+
+def _has_heading_style(para: Paragraph) -> int | None:
+    """检测 Heading N 样式，返回层级 N；非标题返回 None。"""
+    if not para.style:
+        return None
+    s = para.style.lower().strip()
+    # "heading 1", "heading 2", ... or "标题 1", "标题 2", ...
+    for prefix in ("heading ", "标题 "):
+        if s.startswith(prefix):
+            rest = s[len(prefix):]
+            if rest.isdigit():
+                return int(rest)
+    return None
 
 
 def _fuzzy_match(title: str, para_text: str, threshold: float = 0.7) -> bool:
@@ -135,13 +164,31 @@ def _sections_to_chapters(sections: list[dict], total_paragraphs: int) -> list[d
 
 # ========== 策略实现 ==========
 
+def strategy_heading(paragraphs: list[Paragraph]) -> list[dict]:
+    """策略 0：Heading 样式直接提取章节结构。
+
+    直接利用 Word 的 Heading 1/2/3/4 样式，无需正则或模糊匹配。
+    """
+    sections: list[dict] = []
+    for p in paragraphs:
+        level = _has_heading_style(p)
+        if level is not None and p.text.strip() and len(p.text.strip()) < _MAX_HEADING_LEN:
+            sections.append({
+                "title": p.text.strip(),
+                "start": p.index,
+                "level": level,
+            })
+    return sections
+
+
 def strategy_toc(paragraphs: list[Paragraph]) -> list[dict] | None:
     """策略 1：目录识别 + 模糊匹配定位正文段落。
 
     成功条件：匹配到 >= 3 个 TOC 条目。
     Returns None if no TOC detected.
     """
-    scan_range = paragraphs[:80]
+    # 投标文件目录可能较长（几十个条目），扫描前 200 段
+    scan_range = paragraphs[:200]
 
     # 子策略 A：TOC style 检测
     toc_entries: list[dict] = []
@@ -331,6 +378,21 @@ def build_tender_index(
     }
     """
     total = len(paragraphs)
+
+    # 策略 0：Heading 样式直接提取（最高优先级）
+    heading_sections = strategy_heading(paragraphs)
+    if heading_sections and len(heading_sections) >= 3:
+        chapters = _sections_to_chapters(heading_sections, total)
+        top = [s for s in heading_sections if s["level"] == 1] or heading_sections
+        assigned = _count_assigned(paragraphs, heading_sections)
+        confidence = compute_confidence(len(top), total, assigned)
+        all_paths = collect_all_paths(chapters)
+        return {
+            "toc_source": "heading_style",
+            "confidence": confidence,
+            "chapters": chapters,
+            "all_paths": all_paths,
+        }
 
     # 策略 1：目录识别（单独赛道，成功直接采用）
     toc_sections = strategy_toc(paragraphs)

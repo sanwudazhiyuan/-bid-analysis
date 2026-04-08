@@ -34,6 +34,8 @@ export interface ReviewTask {
   version: number
   status: string
   progress: number
+  current_step: string | null
+  error_message: string | null
   review_summary: ReviewSummary | null
   review_items: ReviewItem[] | null
   created_at: string

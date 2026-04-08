@@ -261,31 +261,36 @@ class TestDotNumberRegex:
         assert not _RE_DOT.match("1 概述")
 
 
-class TestBuildChapterTreeText:
+class TestBuildNumberedChapterList:
     def test_output_format(self):
-        """验证章节树文本输出缩进和叶子标签。"""
-        from src.reviewer.clause_mapper import _build_chapter_tree_text
+        """验证编号列表输出格式和编号→path映射。"""
+        from src.reviewer.clause_mapper import _build_numbered_chapter_list
 
         tender_index = {"chapters": [
-            {"path": "/第一章", "para_count": 20, "is_leaf": False, "needs_split": False, "children": [
-                {"path": "/第一章/1.1", "para_count": 10, "is_leaf": True, "needs_split": False, "children": []},
-                {"path": "/第一章/1.2", "para_count": 10, "is_leaf": True, "needs_split": False, "children": []},
+            {"title": "第一章", "path": "/第一章", "para_count": 20, "is_leaf": False, "needs_split": False, "children": [
+                {"title": "1.1", "path": "/第一章/1.1", "para_count": 10, "is_leaf": True, "needs_split": False, "children": []},
+                {"title": "1.2", "path": "/第一章/1.2", "para_count": 10, "is_leaf": True, "needs_split": False, "children": []},
             ]},
         ]}
-        text = _build_chapter_tree_text(tender_index)
+        text, id_to_path = _build_numbered_chapter_list(tender_index)
         lines = text.strip().split("\n")
         assert len(lines) == 3
-        assert "/第一章" in lines[0]
+        assert "[0]" in lines[0]
         assert "叶子" not in lines[0]  # 非叶子不标记
-        assert "  /第一章/1.1" in lines[1]  # 缩进
+        assert "[1]" in lines[1]  # 子节点编号
         assert "叶子" in lines[1]
+        # 验证映射
+        assert id_to_path[0] == "/第一章"
+        assert id_to_path[1] == "/第一章/1.1"
+        assert id_to_path[2] == "/第一章/1.2"
 
     def test_needs_split_tag(self):
         """需要拆分的叶子显示拆分标签。"""
-        from src.reviewer.clause_mapper import _build_chapter_tree_text
+        from src.reviewer.clause_mapper import _build_numbered_chapter_list
 
         tender_index = {"chapters": [
-            {"path": "/大章", "para_count": 2000, "is_leaf": True, "needs_split": True, "children": []},
+            {"title": "大章", "path": "/大章", "para_count": 2000, "is_leaf": True, "needs_split": True, "children": []},
         ]}
-        text = _build_chapter_tree_text(tender_index)
+        text, id_to_path = _build_numbered_chapter_list(tender_index)
         assert "需拆分" in text
+        assert id_to_path[0] == "/大章"

@@ -65,6 +65,10 @@ router.beforeEach(async (to) => {
     const auth = useAuthStore()
     if (!auth.user) {
       await auth.fetchUser()
+      // fetchUser 失败且 token 被清除（401），重定向到登录
+      if (!auth.isAuthenticated && to.matched.some(r => r.meta.requiresAuth)) {
+        return { name: 'login' }
+      }
     }
   }
 })

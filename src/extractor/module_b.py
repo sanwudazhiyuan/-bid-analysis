@@ -23,7 +23,11 @@ _RELEVANT_SECTION_KEYWORDS = [
 ]
 
 
-def _filter_paragraphs(tagged_paragraphs: list[TaggedParagraph]) -> list[TaggedParagraph]:
+def _filter_paragraphs(
+    tagged_paragraphs: list[TaggedParagraph],
+    embeddings_map: dict[int, list[float]] | None = None,
+    module_embedding: list[float] | None = None,
+) -> list[TaggedParagraph]:
     """筛选与投标人资格条件相关的段落。"""
     text_keywords = [
         "营业执照", "注册资本", "资格条件", "投标人应", "投标人须",
@@ -54,6 +58,17 @@ def _filter_paragraphs(tagged_paragraphs: list[TaggedParagraph]) -> list[TaggedP
             selected_indices.add(tp.index)
             continue
 
+    # 向量语义匹配补漏
+    if embeddings_map and module_embedding:
+        from src.extractor.embedding import filter_by_similarity
+        extra = filter_by_similarity(
+            tagged_paragraphs, embeddings_map, module_embedding,
+            exclude_indices=selected_indices,
+        )
+        for tp in extra:
+            selected.append(tp)
+            selected_indices.add(tp.index)
+
     if len(selected) < 5 and len(tagged_paragraphs) > 0:
         front_count = max(int(len(tagged_paragraphs) * 0.2), 10)
         for tp in tagged_paragraphs[:front_count]:
@@ -78,9 +93,15 @@ def _build_input_text(paragraphs: list[TaggedParagraph]) -> str:
 def extract_module_b(
     tagged_paragraphs: list[TaggedParagraph],
     settings: dict | None = None,
+    embeddings_map: dict[int, list[float]] | None = None,
+    module_embedding: list[float] | None = None,
 ) -> dict | None:
     """提取 B. 投标人资格条件。"""
-    filtered = _filter_paragraphs(tagged_paragraphs)
+    filtered = _filter_paragraphs(
+        tagged_paragraphs,
+        embeddings_map=embeddings_map,
+        module_embedding=module_embedding,
+    )
     if not filtered:
         logger.warning("module_b: 未筛选到相关段落")
         return None

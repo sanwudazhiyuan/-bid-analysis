@@ -1,5 +1,62 @@
 """Tests for clause extraction from extracted_data."""
-from src.reviewer.clause_extractor import extract_review_clauses, extract_project_context
+from dataclasses import dataclass
+
+from src.reviewer.clause_extractor import (
+    extract_review_clauses,
+    extract_project_context,
+    _parse_para_indices,
+    _build_enriched_basis,
+)
+
+
+@dataclass
+class FakeParagraph:
+    index: int
+    text: str
+
+
+class TestParseParaIndices:
+    def test_single_index(self):
+        assert _parse_para_indices("[57]") == [57]
+
+    def test_multiple_indices(self):
+        assert _parse_para_indices("三、采购需求 [57][68]") == [57, 68]
+
+    def test_mixed_text_and_indices(self):
+        assert _parse_para_indices("二、资格条件 [30] / 三、采购需求 [83]") == [30, 83]
+
+    def test_no_indices(self):
+        assert _parse_para_indices("第三章 评审程序") == []
+
+    def test_empty_string(self):
+        assert _parse_para_indices("") == []
+
+
+class TestBuildEnrichedBasis:
+    def test_with_paragraphs(self):
+        paragraphs = [
+            FakeParagraph(index=56, text="前一段"),
+            FakeParagraph(index=57, text="投标时针对提供的样本卡片通过测试要求后为有效标"),
+            FakeParagraph(index=68, text="否则视为废标"),
+        ]
+        result = _build_enriched_basis(
+            basis_text="样卡测试需通过",
+            source_text="三、采购需求 [57][68]",
+            tagged_paragraphs=paragraphs,
+        )
+        assert "样卡测试需通过" in result
+        assert "[57]" in result
+        assert "投标时针对提供的样本卡片" in result
+        assert "[68]" in result
+        assert "否则视为废标" in result
+
+    def test_no_indices_returns_basis_only(self):
+        result = _build_enriched_basis("原文依据", "第三章", [])
+        assert result == "原文依据"
+
+    def test_missing_paragraph_skipped(self):
+        result = _build_enriched_basis("依据", "[999]", [])
+        assert result == "依据"
 
 
 def _make_extracted_data():

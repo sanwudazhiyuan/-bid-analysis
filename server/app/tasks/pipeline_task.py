@@ -62,10 +62,10 @@ def run_pipeline(self, task_id: str):
             task.parsed_path = parsed_path
             db.commit()
 
-        # Layer 2: Index (10-20%)
+        # Layer 2: Index (10-15%)
         self.update_state(
             state="PROGRESS",
-            meta={"step": "indexing", "detail": "构建索引中...", "progress": 15},
+            meta={"step": "indexing", "detail": "构建索引中...", "progress": 12},
         )
         index_result = build_index(paragraphs)
         indexed_path = os.path.join(data_dir, "indexed.json")
@@ -77,27 +77,69 @@ def run_pipeline(self, task_id: str):
             task.indexed_path = indexed_path
             db.commit()
 
-        # Layer 3: Extract (20-90%)
+        # Layer 3: Embedding (15-25%) — 并行计算段落与模块向量
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from src.extractor.embedding import compute_paragraph_embeddings, compute_module_embeddings
+
         api_settings = load_settings()
         tagged = index_result.get("tagged_paragraphs", [])
+
+        self.update_state(
+            state="PROGRESS",
+            meta={"step": "embedding", "detail": "计算向量中...", "progress": 16},
+        )
+
+        with Session(_sync_engine) as db:
+            task = _get_task(db, task_id)
+            task.status = "embedding"
+            db.commit()
+
+        embeddings_map = compute_paragraph_embeddings(tagged, api_settings)
+        module_embeddings = compute_module_embeddings(api_settings)
+
+        self.update_state(
+            state="PROGRESS",
+            meta={"step": "embedding", "detail": "向量计算完成", "progress": 25},
+        )
+
+        with Session(_sync_engine) as db:
+            task = _get_task(db, task_id)
+            task.status = "extracting"
+            db.commit()
+
+        # Layer 4: Extract (25-90%) — 并发提取所有模块
         modules_result = {}
-        for i, module_key in enumerate(_MODULE_KEYS):
-            progress = 20 + int(70 * i / len(_MODULE_KEYS))
-            self.update_state(
-                state="PROGRESS",
-                meta={
-                    "step": "extracting",
-                    "detail": f"提取 {module_key} [{i + 1}/{len(_MODULE_KEYS)}]",
-                    "progress": progress,
-                    "current_module": module_key,
-                    "modules_done": i,
-                    "modules_total": len(_MODULE_KEYS),
-                },
-            )
+        MAX_EXTRACT_WORKERS = 8
+
+        def _extract_module(module_key: str) -> tuple[str, dict | None]:
             try:
-                modules_result[module_key] = extract_single_module(module_key, tagged, api_settings)
+                return module_key, extract_single_module(
+                    module_key, tagged, api_settings,
+                    embeddings_map=embeddings_map,
+                    module_embeddings=module_embeddings,
+                )
             except Exception as e:
-                modules_result[module_key] = {"status": "failed", "error": str(e)}
+                return module_key, {"status": "failed", "error": str(e)}
+
+        with ThreadPoolExecutor(max_workers=MAX_EXTRACT_WORKERS) as executor:
+            futures = {executor.submit(_extract_module, mk): mk for mk in _MODULE_KEYS}
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                module_key, result_data = future.result()
+                modules_result[module_key] = result_data
+                progress = 25 + int(65 * completed / len(_MODULE_KEYS))
+                self.update_state(
+                    state="PROGRESS",
+                    meta={
+                        "step": "extracting",
+                        "detail": f"提取 {module_key} [{completed}/{len(_MODULE_KEYS)}]",
+                        "progress": progress,
+                        "current_module": module_key,
+                        "modules_done": completed,
+                        "modules_total": len(_MODULE_KEYS),
+                    },
+                )
 
         extracted = {"schema_version": "1.0", "modules": modules_result}
         extracted_path = os.path.join(data_dir, "extracted.json")

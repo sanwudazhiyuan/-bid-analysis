@@ -8,7 +8,7 @@ export type ReviewStage = 'upload' | 'processing' | 'preview'
 export const useReviewStore = defineStore('review', () => {
   const stage = ref<ReviewStage>('upload')
   const selectedBidTask = ref<{ id: string; filename: string } | null>(null)
-  const currentReviewId = ref<string | null>(null)
+  const currentReviewId = ref<string | null>(localStorage.getItem('current_review_id'))
   const progress = ref(0)
   const currentStep = ref('')
   const detail = ref('')
@@ -21,6 +21,7 @@ export const useReviewStore = defineStore('review', () => {
     try {
       const res = await reviewsApi.create(bidTaskId, tenderFile)
       currentReviewId.value = res.data.id
+      localStorage.setItem('current_review_id', res.data.id)
       stage.value = 'processing'
       progress.value = 0
     } catch (e: any) {
@@ -67,10 +68,38 @@ export const useReviewStore = defineStore('review', () => {
     }
   }
 
+  async function loadReviewState() {
+    if (!currentReviewId.value) return
+    try {
+      const res = await reviewsApi.get(currentReviewId.value)
+      const review = res.data
+      progress.value = review.progress || 0
+      currentStep.value = review.current_step || ''
+      reviewSummary.value = review.review_summary || null
+      reviewItems.value = review.review_items || []
+      error.value = review.error_message || null
+
+      const statusMap: Record<string, ReviewStage> = {
+        pending: 'processing',
+        indexing: 'processing',
+        reviewing: 'processing',
+        completed: 'preview',
+        failed: 'upload',
+      }
+      stage.value = statusMap[review.status] || 'processing'
+      if (review.status === 'failed') {
+        error.value = review.error_message || '审查失败'
+      }
+    } catch {
+      resetToUpload()
+    }
+  }
+
   function resetToUpload() {
     stage.value = 'upload'
     selectedBidTask.value = null
     currentReviewId.value = null
+    localStorage.removeItem('current_review_id')
     progress.value = 0
     currentStep.value = ''
     detail.value = ''
@@ -82,6 +111,6 @@ export const useReviewStore = defineStore('review', () => {
   return {
     stage, selectedBidTask, currentReviewId, progress, currentStep, detail,
     reviewSummary, reviewItems, error,
-    startReview, handleProgressEvent, loadReviewResult, resetToUpload,
+    startReview, handleProgressEvent, loadReviewResult, loadReviewState, resetToUpload,
   }
 })

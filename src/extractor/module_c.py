@@ -78,7 +78,11 @@ def _resolve_references(
     return appended
 
 
-def _filter_paragraphs(tagged_paragraphs: list[TaggedParagraph]) -> list[TaggedParagraph]:
+def _filter_paragraphs(
+    tagged_paragraphs: list[TaggedParagraph],
+    embeddings_map: dict[int, list[float]] | None = None,
+    module_embedding: list[float] | None = None,
+) -> list[TaggedParagraph]:
     """筛选与评标办法和评分标准相关的段落。
 
     评分内容可能出现在：
@@ -137,6 +141,17 @@ def _filter_paragraphs(tagged_paragraphs: list[TaggedParagraph]) -> list[TaggedP
                 selected.append(tp)
                 selected_indices.add(tp.index)
 
+    # 向量语义匹配补漏
+    if embeddings_map and module_embedding:
+        from src.extractor.embedding import filter_by_similarity
+        extra = filter_by_similarity(
+            tagged_paragraphs, embeddings_map, module_embedding,
+            exclude_indices=selected_indices,
+        )
+        for tp in extra:
+            selected.append(tp)
+            selected_indices.add(tp.index)
+
     # 交叉引用解析：检测已筛选段落中的引用，追加被引用段落
     ref_appended = _resolve_references(selected, tagged_paragraphs, selected_indices)
     if ref_appended:
@@ -160,9 +175,15 @@ def _build_input_text(paragraphs: list[TaggedParagraph]) -> str:
 def extract_module_c(
     tagged_paragraphs: list[TaggedParagraph],
     settings: dict | None = None,
+    embeddings_map: dict[int, list[float]] | None = None,
+    module_embedding: list[float] | None = None,
 ) -> dict | None:
     """提取 C. 评标办法与评分标准。"""
-    filtered = _filter_paragraphs(tagged_paragraphs)
+    filtered = _filter_paragraphs(
+        tagged_paragraphs,
+        embeddings_map=embeddings_map,
+        module_embedding=module_embedding,
+    )
     if not filtered:
         logger.warning("module_c: 未筛选到相关段落")
         return None
