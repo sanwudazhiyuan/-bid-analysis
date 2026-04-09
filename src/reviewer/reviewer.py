@@ -112,13 +112,20 @@ def llm_review_clause(
     if not isinstance(result, dict):
         return _error_item(clause)
 
-    # Normalize locations format
+    # Normalize and validate locations
     locations = result.get("locations", [])
     normalized_locations = []
     for loc in locations:
         if isinstance(loc, dict):
+            pi = loc.get("para_index")
+            # Validate para_index is a real integer
+            if pi is not None:
+                try:
+                    pi = int(pi)
+                except (TypeError, ValueError):
+                    pi = None
             normalized_locations.append({
-                "para_index": loc.get("para_index"),
+                "para_index": pi,
                 "text_snippet": loc.get("text_snippet", ""),
                 "reason": loc.get("reason", ""),
             })
@@ -131,7 +138,7 @@ def llm_review_clause(
         "confidence": int(result.get("confidence", 0)),
         "reason": result.get("reason", ""),
         "severity": clause["severity"],
-        "tender_locations": _build_tender_locations(normalized_locations, clause),
+        "tender_locations": _build_tender_locations(normalized_locations),
     }
 
 
@@ -408,7 +415,7 @@ def _error_item(clause: dict) -> dict:
     }
 
 
-def _build_tender_locations(locations: list[dict], clause: dict) -> list[dict]:
+def _build_tender_locations(locations: list[dict]) -> list[dict]:
     """Build tender_locations from LLM response locations.
 
     保留每个 para_index 对应的独立 reason，用于逐段批注。

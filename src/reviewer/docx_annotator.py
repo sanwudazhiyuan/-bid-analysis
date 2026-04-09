@@ -181,6 +181,11 @@ def _build_para_review_map(review_items: list[dict]) -> dict[int, list[tuple[dic
                 indices = loc.get("para_indices", [])
             per_para_reasons = loc.get("per_para_reasons", {})
             for pi in indices:
+                # Validate para_index type
+                try:
+                    pi = int(pi)
+                except (TypeError, ValueError):
+                    continue
                 if pi not in seen_paras:
                     seen_paras.add(pi)
                     reason = per_para_reasons.get(pi, "") or per_para_reasons.get(str(pi), "")
