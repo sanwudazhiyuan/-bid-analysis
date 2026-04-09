@@ -57,6 +57,8 @@ def run_review(self, review_id: str):
             if not extracted_data:
                 raise ValueError("招标文件尚未完成解析")
 
+            review_mode = review.review_mode or "fixed"
+
             # Step 1: Parse tender file (0-5%)
             review.status = "indexing"
             review.progress = 0
@@ -138,167 +140,239 @@ def run_review(self, review_id: str):
                 db.commit()
                 return {"status": "completed", "review_id": review_id, "clauses": 0}
 
-            # Step 4: Chapter mapping (12-15%)
-            self.update_state(state="PROGRESS", meta={"step": "extracting", "progress": 12, "detail": "条款映射"})
-            clause_mapping = llm_map_clauses_to_leaf_nodes(clauses, tender_index, api_settings)
-
-            # 构建 image_map: filename → file_path，用于多模态审查
-            image_map = {}
-            for img in extracted_images:
-                if img.get("path") and img.get("filename"):
-                    image_map[img["filename"]] = img["path"]
-            if image_map:
-                logger.info("Image map built: %d images available for multimodal review", len(image_map))
-
-            # Step 5-7: 并发审查 (15-95%)
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-            def _no_match_item(clause: dict) -> dict:
-                return {
-                    "source_module": clause["source_module"],
-                    "clause_index": clause["clause_index"],
-                    "clause_text": clause["clause_text"],
-                    "result": "warning",
-                    "confidence": 0,
-                    "reason": "条款未能映射到投标文件任何章节节点",
-                    "severity": clause["severity"],
-                    "tender_locations": [],
-                }
-
-            def _review_single_clause(clause: dict) -> dict:
-                """审查单个条款（在线程池中执行）。"""
-                paths = clause_mapping.get(clause["clause_index"], [])
-                if not paths:
-                    return _no_match_item(clause)
-
-                batches = get_text_for_clause(
-                    clause["clause_index"], paths, tender_index, paragraphs
-                )
-                if not batches:
-                    return _no_match_item(clause)
-
-                if len(batches) == 1:
-                    batch = batches[0]
-                    tender_text = paragraphs_to_text(batch.paragraphs)
-                    try:
-                        result = llm_review_clause(clause, tender_text, project_context, api_settings, image_map=image_map)
-                        return map_batch_indices_to_global(result, batch)
-                    except Exception as e:
-                        logger.error("Clause review failed for %d: %s", clause["clause_index"], e)
-                        return {
-                            "source_module": clause["source_module"],
-                            "clause_index": clause["clause_index"],
-                            "clause_text": clause["clause_text"],
-                            "result": "error", "confidence": 0,
-                            "reason": f"LLM 调用失败: {e}",
-                            "severity": clause["severity"], "tender_locations": [],
-                        }
-                else:
-                    # 顺序累积审查：逐批次传递摘要，末批次综合判定
-                    accumulated_summary = ""
-                    all_candidates = []
-
-                    for i, batch in enumerate(batches):
-                        tender_text = paragraphs_to_text(batch.paragraphs)
-                        is_last = (i == len(batches) - 1)
-
-                        if is_last:
-                            try:
-                                result = llm_review_clause_final(
-                                    clause, tender_text, project_context,
-                                    accumulated_summary, all_candidates,
-                                    api_settings, image_map=image_map,
-                                )
-                                # 校验末批次 locations 的索引
-                                batch_indices = {p.index for p in batch.paragraphs}
-                                validated_locations = []
-                                for loc in result.get("locations", []):
-                                    pi = loc.get("para_index")
-                                    if pi is not None and int(pi) in batch_indices:
-                                        validated_locations.append(loc)
-                                result["locations"] = validated_locations
-                                return assemble_multi_batch_result(result, all_candidates)
-                            except Exception as e:
-                                logger.error("Clause final review failed for %d: %s", clause["clause_index"], e)
-                                return {
-                                    "source_module": clause["source_module"],
-                                    "clause_index": clause["clause_index"],
-                                    "clause_text": clause["clause_text"],
-                                    "result": "error", "confidence": 0,
-                                    "reason": f"LLM 调用失败: {e}",
-                                    "severity": clause["severity"], "tender_locations": [],
-                                }
-                        else:
-                            try:
-                                intermediate = llm_review_clause_intermediate(
-                                    clause, tender_text, project_context,
-                                    prev_summary=accumulated_summary,
-                                    prev_candidates=all_candidates if all_candidates else None,
-                                    api_settings=api_settings,
-                                    image_map=image_map,
-                                )
-                                # 校验候选索引是否在当前批次范围内
-                                batch_indices = {p.index for p in batch.paragraphs}
-                                valid_candidates = [
-                                    c for c in intermediate.get("candidates", [])
-                                    if c.get("para_index") is not None and int(c["para_index"]) in batch_indices
-                                ]
-                                all_candidates.extend(valid_candidates)
-                                accumulated_summary = intermediate.get("summary", accumulated_summary)
-                            except Exception as e:
-                                logger.error("Clause intermediate review failed for batch %s: %s", batch.batch_id, e)
-                                # 中间批次失败不致命，继续下一批次
-                                accumulated_summary += f"\n批次{batch.batch_id}审查失败: {e}"
-
             all_clauses = sorted(clauses, key=lambda c: {"critical": 0, "major": 1, "minor": 2}.get(c["severity"], 9))
             clause_progress_start = 15
             clause_progress_end = 95
 
-            # 并发提交所有条款审查（最多 5 个并发，避免 API 限流）
-            MAX_WORKERS = 8
-            results_by_index: dict[int, dict] = {}
-            futures = {}
+            from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                for clause in all_clauses:
-                    future = executor.submit(_review_single_clause, clause)
-                    futures[future] = clause
+            if review_mode == "smart":
+                # ── 智能审核模式：构建文件夹 → haha-code 逐条审查 ──
+                from src.reviewer.folder_builder import build_tender_folder
+                from src.reviewer.smart_reviewer import call_smart_review
 
-                completed = 0
-                for future in as_completed(futures):
-                    clause = futures[future]
-                    completed += 1
-                    progress = clause_progress_start + int(
-                        (clause_progress_end - clause_progress_start) * completed / max(len(all_clauses), 1)
-                    )
-                    review.progress = progress
-                    review.current_step = f"审查 [{completed}/{len(all_clauses)}]"
-                    db.commit()
-                    self.update_state(state="PROGRESS", meta={
-                        "step": "reviewing", "progress": progress,
-                        "detail": review.current_step,
+                # Step 4s: 构建投标文件文件夹结构 (12-15%)
+                self.update_state(state="PROGRESS", meta={"step": "extracting", "progress": 12, "detail": "构建文件夹"})
+                review.progress = 12
+                review.current_step = "构建文件夹结构"
+                db.commit()
+
+                import os
+                folder_dir = os.path.join(os.path.dirname(review.tender_file_path), "tender_folder")
+                build_tender_folder(paragraphs, tender_index, extracted_images, folder_dir)
+                logger.info("Tender folder built at %s", folder_dir)
+
+                # Step 5s-7s: 并发智能审查 (15-95%)
+                SMART_MAX_WORKERS = 4
+                results_by_index: dict[int, dict] = {}
+                futures = {}
+
+                with ThreadPoolExecutor(max_workers=SMART_MAX_WORKERS) as executor:
+                    for clause in all_clauses:
+                        future = executor.submit(call_smart_review, clause, folder_dir, project_context)
+                        futures[future] = clause
+
+                    completed = 0
+                    for future in as_completed(futures):
+                        clause = futures[future]
+                        completed += 1
+                        progress = clause_progress_start + int(
+                            (clause_progress_end - clause_progress_start) * completed / max(len(all_clauses), 1)
+                        )
+                        review.progress = progress
+                        review.current_step = f"智能审查 [{completed}/{len(all_clauses)}]"
+                        db.commit()
+                        self.update_state(state="PROGRESS", meta={
+                            "step": "reviewing", "progress": progress,
+                            "detail": review.current_step,
+                        })
+
+                        try:
+                            result = future.result()
+                        except Exception as e:
+                            logger.error("Smart review error for clause %d: %s", clause["clause_index"], e)
+                            result = {
+                                "source_module": clause["source_module"],
+                                "clause_index": clause["clause_index"],
+                                "clause_text": clause["clause_text"],
+                                "result": "error", "confidence": 0,
+                                "reason": f"智能审查异常: {e}",
+                                "severity": clause["severity"], "tender_locations": [],
+                            }
+                        results_by_index[clause["clause_index"]] = result
+
+                review_items = []
+                for item_id, clause in enumerate(all_clauses):
+                    result = results_by_index.get(clause["clause_index"], {
+                        "source_module": clause["source_module"],
+                        "clause_index": clause["clause_index"],
+                        "clause_text": clause["clause_text"],
+                        "result": "error", "confidence": 0,
+                        "reason": "智能审查未返回结果",
+                        "severity": clause["severity"], "tender_locations": [],
                     })
+                    result["id"] = item_id
+                    review_items.append(result)
 
-                    try:
-                        result = future.result()
-                    except Exception as e:
-                        logger.error("Unexpected error reviewing clause %d: %s", clause["clause_index"], e)
-                        result = {
-                            "source_module": clause["source_module"],
-                            "clause_index": clause["clause_index"],
-                            "clause_text": clause["clause_text"],
-                            "result": "error", "confidence": 0,
-                            "reason": f"审查异常: {e}",
-                            "severity": clause["severity"], "tender_locations": [],
-                        }
-                    results_by_index[clause["clause_index"]] = result
+                # 智能审核完成后清理 tender_folder 释放磁盘空间
+                _cleanup_tender_folder(folder_dir)
 
-            # 按原始顺序组装结果
-            review_items = []
-            for item_id, clause in enumerate(all_clauses):
-                result = results_by_index.get(clause["clause_index"], _no_match_item(clause))
-                result["id"] = item_id
-                review_items.append(result)
+            else:
+                # ── 固定审核模式（原有逻辑）──
+                # Step 4: Chapter mapping (12-15%)
+                self.update_state(state="PROGRESS", meta={"step": "extracting", "progress": 12, "detail": "条款映射"})
+                clause_mapping = llm_map_clauses_to_leaf_nodes(clauses, tender_index, api_settings)
+
+                # 构建 image_map: filename → file_path，用于多模态审查
+                image_map = {}
+                for img in extracted_images:
+                    if img.get("path") and img.get("filename"):
+                        image_map[img["filename"]] = img["path"]
+                if image_map:
+                    logger.info("Image map built: %d images available for multimodal review", len(image_map))
+
+                # Step 5-7: 并发审查 (15-95%)
+                def _no_match_item(clause: dict) -> dict:
+                    return {
+                        "source_module": clause["source_module"],
+                        "clause_index": clause["clause_index"],
+                        "clause_text": clause["clause_text"],
+                        "result": "warning",
+                        "confidence": 0,
+                        "reason": "条款未能映射到投标文件任何章节节点",
+                        "severity": clause["severity"],
+                        "tender_locations": [],
+                    }
+
+                def _review_single_clause(clause: dict) -> dict:
+                    """审查单个条款（在线程池中执行）。"""
+                    paths = clause_mapping.get(clause["clause_index"], [])
+                    if not paths:
+                        return _no_match_item(clause)
+
+                    batches = get_text_for_clause(
+                        clause["clause_index"], paths, tender_index, paragraphs
+                    )
+                    if not batches:
+                        return _no_match_item(clause)
+
+                    if len(batches) == 1:
+                        batch = batches[0]
+                        tender_text = paragraphs_to_text(batch.paragraphs)
+                        try:
+                            result = llm_review_clause(clause, tender_text, project_context, api_settings, image_map=image_map)
+                            return map_batch_indices_to_global(result, batch)
+                        except Exception as e:
+                            logger.error("Clause review failed for %d: %s", clause["clause_index"], e)
+                            return {
+                                "source_module": clause["source_module"],
+                                "clause_index": clause["clause_index"],
+                                "clause_text": clause["clause_text"],
+                                "result": "error", "confidence": 0,
+                                "reason": f"LLM 调用失败: {e}",
+                                "severity": clause["severity"], "tender_locations": [],
+                            }
+                    else:
+                        # 顺序累积审查：逐批次传递摘要，末批次综合判定
+                        accumulated_summary = ""
+                        all_candidates = []
+
+                        for i, batch in enumerate(batches):
+                            tender_text = paragraphs_to_text(batch.paragraphs)
+                            is_last = (i == len(batches) - 1)
+
+                            if is_last:
+                                try:
+                                    result = llm_review_clause_final(
+                                        clause, tender_text, project_context,
+                                        accumulated_summary, all_candidates,
+                                        api_settings, image_map=image_map,
+                                    )
+                                    # 校验末批次 locations 的索引
+                                    batch_indices = {p.index for p in batch.paragraphs}
+                                    validated_locations = []
+                                    for loc in result.get("locations", []):
+                                        pi = loc.get("para_index")
+                                        if pi is not None and int(pi) in batch_indices:
+                                            validated_locations.append(loc)
+                                    result["locations"] = validated_locations
+                                    return assemble_multi_batch_result(result, all_candidates)
+                                except Exception as e:
+                                    logger.error("Clause final review failed for %d: %s", clause["clause_index"], e)
+                                    return {
+                                        "source_module": clause["source_module"],
+                                        "clause_index": clause["clause_index"],
+                                        "clause_text": clause["clause_text"],
+                                        "result": "error", "confidence": 0,
+                                        "reason": f"LLM 调用失败: {e}",
+                                        "severity": clause["severity"], "tender_locations": [],
+                                    }
+                            else:
+                                try:
+                                    intermediate = llm_review_clause_intermediate(
+                                        clause, tender_text, project_context,
+                                        prev_summary=accumulated_summary,
+                                        prev_candidates=all_candidates if all_candidates else None,
+                                        api_settings=api_settings,
+                                        image_map=image_map,
+                                    )
+                                    # 校验候选索引是否在当前批次范围内
+                                    batch_indices = {p.index for p in batch.paragraphs}
+                                    valid_candidates = [
+                                        c for c in intermediate.get("candidates", [])
+                                        if c.get("para_index") is not None and int(c["para_index"]) in batch_indices
+                                    ]
+                                    all_candidates.extend(valid_candidates)
+                                    accumulated_summary = intermediate.get("summary", accumulated_summary)
+                                except Exception as e:
+                                    logger.error("Clause intermediate review failed for batch %s: %s", batch.batch_id, e)
+                                    # 中间批次失败不致命，继续下一批次
+                                    accumulated_summary += f"\n批次{batch.batch_id}审查失败: {e}"
+
+                MAX_WORKERS = 8
+                results_by_index: dict[int, dict] = {}
+                futures = {}
+
+                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                    for clause in all_clauses:
+                        future = executor.submit(_review_single_clause, clause)
+                        futures[future] = clause
+
+                    completed = 0
+                    for future in as_completed(futures):
+                        clause = futures[future]
+                        completed += 1
+                        progress = clause_progress_start + int(
+                            (clause_progress_end - clause_progress_start) * completed / max(len(all_clauses), 1)
+                        )
+                        review.progress = progress
+                        review.current_step = f"审查 [{completed}/{len(all_clauses)}]"
+                        db.commit()
+                        self.update_state(state="PROGRESS", meta={
+                            "step": "reviewing", "progress": progress,
+                            "detail": review.current_step,
+                        })
+
+                        try:
+                            result = future.result()
+                        except Exception as e:
+                            logger.error("Unexpected error reviewing clause %d: %s", clause["clause_index"], e)
+                            result = {
+                                "source_module": clause["source_module"],
+                                "clause_index": clause["clause_index"],
+                                "clause_text": clause["clause_text"],
+                                "result": "error", "confidence": 0,
+                                "reason": f"审查异常: {e}",
+                                "severity": clause["severity"], "tender_locations": [],
+                            }
+                        results_by_index[clause["clause_index"]] = result
+
+                # 按原始顺序组装结果
+                review_items = []
+                for item_id, clause in enumerate(all_clauses):
+                    result = results_by_index.get(clause["clause_index"], _no_match_item(clause))
+                    result["id"] = item_id
+                    review_items.append(result)
 
             # Step 8: Generate docx (95-100%)
             review.progress = 95
@@ -402,3 +476,15 @@ def _load_bid_tagged_paragraphs(bid_task) -> list:
     except Exception:
         logger.warning("Failed to load bid tagged_paragraphs from %s", indexed_path, exc_info=True)
         return []
+
+
+def _cleanup_tender_folder(folder_dir: str):
+    """审核完成后清理 tender_folder 释放磁盘空间。"""
+    import os
+    import shutil
+    if os.path.isdir(folder_dir):
+        try:
+            shutil.rmtree(folder_dir)
+            logger.info("Cleaned up tender_folder: %s", folder_dir)
+        except Exception:
+            logger.warning("Failed to clean up tender_folder: %s", folder_dir, exc_info=True)
