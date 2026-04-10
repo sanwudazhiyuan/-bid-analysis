@@ -175,6 +175,14 @@ def run_review(self, review_id: str):
                             image_para_map.setdefault(pi, []).append(desc)
                         image_para_files.setdefault(pi, []).append(img["filename"])
 
+                logger.info(
+                    "图片映射分组: %d 张图片映射到 %d 个段落, image_para_map: %s, image_para_files: %s",
+                    len(extracted_images),
+                    len(image_para_map),
+                    {pi: len(descs) for pi, descs in image_para_map.items()},
+                    {pi: len(fns) for pi, fns in image_para_files.items()},
+                )
+
                 # Step 4s-2: 条款→招标文件章节映射 (8-11%)
                 # 智能审核：映射到招标文件章节，提取招标原文作为条款上下文
                 # （agent 会自行浏览投标文件夹，不需要预提取投标文件内容）

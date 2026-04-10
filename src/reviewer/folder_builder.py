@@ -202,6 +202,12 @@ def build_tender_folder(
             node_desc = {p.index: image_para_map[p.index] for p in node_paras if p.index in image_para_map}
             node_files = {p.index: compressed_file_map[p.index] for p in node_paras if p.index in compressed_file_map}
 
+            logger.debug(
+                "节点 [%s] P%d-P%d: %d 个段落, %d 个图片描述, %d 个图片文件, 描述段落: %s",
+                title, start, end, len(node_paras), len(node_desc), len(node_files),
+                list(node_desc.keys()),
+            )
+
             prefix = _images_rel_prefix(depth)
             md_content = _build_leaf_md(title, node_paras, node_desc, node_files, prefix)
             md_path = os.path.join(parent_dir, f"{safe_title}.md")

@@ -104,9 +104,11 @@ def _extract_from_docx(file_path: str, output_dir: str) -> list[dict]:
                                     found_images.append(rid_to_media[embed])
 
                             if has_text:
-                                # Flush pending images from previous empty paragraphs
+                                # 独立图片段落的图片应关联到前一个文字段落（标题），
+                                # 而非延后到当前段落。这样图片描述会嵌入到正确的章节中。
+                                target_idx = para_idx - 1 if para_idx > 0 else para_idx
                                 for media_fn in pending_images:
-                                    para_image_map[media_fn] = para_idx
+                                    para_image_map[media_fn] = target_idx
                                 pending_images.clear()
                                 # Assign current paragraph's images
                                 for media_fn in found_images:
@@ -116,9 +118,10 @@ def _extract_from_docx(file_path: str, output_dir: str) -> list[dict]:
                                 # Image-only paragraph: defer to next text paragraph
                                 pending_images.extend(found_images)
                         elif child.tag == w_tbl:
-                            # Flush pending images into this table's index
+                            # Flush pending images to the preceding text paragraph's index
+                            target_idx = para_idx - 1 if para_idx > 0 else para_idx
                             for media_fn in pending_images:
-                                para_image_map[media_fn] = para_idx
+                                para_image_map[media_fn] = target_idx
                             pending_images.clear()
                             # Table images
                             blip_elems = child.findall(".//a:blip", ns)
@@ -156,6 +159,11 @@ def _extract_from_docx(file_path: str, output_dir: str) -> list[dict]:
     except Exception as e:
         logger.warning("Failed to extract images from docx: %s", e)
 
+    logger.info(
+        "图片提取完成: %d 张, 映射关系: %s",
+        len(images),
+        {img["filename"]: img.get("near_para_index") for img in images}
+    )
     return images
 
 

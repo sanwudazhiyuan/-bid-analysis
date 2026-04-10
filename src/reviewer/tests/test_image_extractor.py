@@ -45,9 +45,9 @@ def test_extract_images_from_docx(docx_with_image, tmp_path):
     assert len(images) >= 1
     assert images[0]["filename"].endswith(".png") or images[0]["filename"].endswith(".jpeg")
     assert os.path.exists(images[0]["path"])
-    # Image-only paragraph is deferred to next text paragraph "资质证书如上图所示"
-    # which is index 1 (after "第一章 投标函" at index 0, skipping the empty image paragraph)
-    assert images[0]["near_para_index"] == 1
+    # 独立图片段落的图片应关联到前一个文字段落 "第一章 投标函" (P0)，
+    # 这样证书图片的描述会嵌入到正确的章节中，而非错误地关联到后续段落。
+    assert images[0]["near_para_index"] == 0
 
 
 def test_extract_images_no_images(tmp_path):
