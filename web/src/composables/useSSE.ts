@@ -1,7 +1,7 @@
 import { ref, onUnmounted } from 'vue'
 import type { ProgressEvent } from '../types/task'
 
-export function useSSE(taskId: string) {
+export function useSSE(taskId: string, customUrl?: string) {
   const progress = ref<ProgressEvent | null>(null)
   const connected = ref(false)
   const done = ref(false)
@@ -13,7 +13,8 @@ export function useSSE(taskId: string) {
     abortController = new AbortController()
 
     try {
-      const response = await fetch(`/api/tasks/${taskId}/progress`, {
+      const url = customUrl || `/api/tasks/${taskId}/progress`
+      const response = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` },
         signal: abortController.signal,
       })

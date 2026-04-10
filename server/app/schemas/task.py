@@ -15,6 +15,7 @@ class TaskResponse(BaseModel):
     current_step: str | None
     progress: int
     error_message: str | None
+    extracted_data: dict | None = None
     created_at: datetime.datetime
     started_at: datetime.datetime | None
     completed_at: datetime.datetime | None

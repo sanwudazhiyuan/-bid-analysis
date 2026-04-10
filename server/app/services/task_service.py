@@ -14,25 +14,31 @@ ALLOWED_EXT = {ext.lower() for ext in settings.ALLOWED_EXTENSIONS}
 
 
 async def create_task_from_upload(db: AsyncSession, file: UploadFile, user_id: int) -> Task:
-    _, ext = os.path.splitext(file.filename or "")
+    # Ensure filename is properly decoded (handle latin-1 encoded Chinese filenames)
+    filename = file.filename or ""
+    try:
+        filename = filename.encode("latin-1").decode("utf-8")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        pass  # already valid UTF-8
+    _, ext = os.path.splitext(filename)
     if ext.lower() not in ALLOWED_EXT:
         raise HTTPException(status_code=400, detail=f"不支持的文件类型: {ext}")
 
     content = await file.read()
     if len(content) > settings.MAX_UPLOAD_SIZE:
-        raise HTTPException(status_code=400, detail="文件大小超过限制 (50MB)")
+        raise HTTPException(status_code=400, detail="文件大小超过限制 (500MB)")
 
     task_id = uuid.uuid4()
     upload_dir = os.path.join(settings.DATA_DIR, "uploads", str(task_id))
     os.makedirs(upload_dir, exist_ok=True)
-    file_path = os.path.join(upload_dir, file.filename)
+    file_path = os.path.join(upload_dir, filename)
     with open(file_path, "wb") as f:
         f.write(content)
 
     task = Task(
         id=task_id,
         user_id=user_id,
-        filename=file.filename,
+        filename=filename,
         file_path=file_path,
         file_size=len(content),
         status="pending",
@@ -49,12 +55,16 @@ async def get_tasks(
     page: int = 1,
     page_size: int = 20,
     status: str | None = None,
+    q: str | None = None,
 ) -> tuple[list, int]:
     query = select(Task).where(Task.user_id == user_id).order_by(Task.created_at.desc())
     count_query = select(func.count()).select_from(Task).where(Task.user_id == user_id)
     if status:
         query = query.where(Task.status == status)
         count_query = count_query.where(Task.status == status)
+    if q:
+        query = query.where(Task.filename.ilike(f"%{q}%"))
+        count_query = count_query.where(Task.filename.ilike(f"%{q}%"))
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0
     query = query.offset((page - 1) * page_size).limit(page_size)

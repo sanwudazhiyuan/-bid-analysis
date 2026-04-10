@@ -1,6 +1,6 @@
 """投标文件格式生成器：将提取的投标文件格式渲染为 .docx。
 
-输出包含投标函、报价表、服务承诺书等模板结构。
+支持层级编号结构（一、1.1、1.1.1），自动生成目录。
 """
 
 import os
@@ -10,6 +10,78 @@ from docx.shared import RGBColor
 
 from src.generator.style_manager import StyleManager
 from src.generator.table_builder import TableBuilder
+
+
+def _render_section(section: dict, doc: "Document", style_mgr: StyleManager,
+                    table_builder: TableBuilder, level: int = 1) -> None:
+    """递归渲染一个 section 节点。
+
+    level: 1=一级标题(heading2), 2=二级(heading3), 3+=正文加粗
+    """
+    number = section.get("number", "")
+    title = section.get("title", "")
+    section_type = section.get("type", "")
+
+    # 渲染标题
+    if title:
+        heading_text = f"{number}、{title}" if level == 1 and number else f"{number} {title}" if number else title
+        heading_para = doc.add_paragraph()
+        if level == 1:
+            heading_run = heading_para.add_run(heading_text)
+            style_mgr.apply_run_style(heading_run, "heading2")
+        elif level == 2:
+            heading_run = heading_para.add_run(heading_text)
+            style_mgr.apply_run_style(heading_run, "heading3")
+        else:
+            heading_run = heading_para.add_run(heading_text)
+            style_mgr.apply_run_style(heading_run, "body")
+            heading_run.bold = True
+
+    # group 类型：递归渲染子项
+    if section_type == "group":
+        for child in section.get("children", []):
+            _render_section(child, doc, style_mgr, table_builder, level + 1)
+        return
+
+    # 表格类型
+    if section_type in ("key_value_table", "standard_table"):
+        table_builder.build(section, doc)
+    elif section_type in ("text", "template"):
+        content = section.get("content", "")
+        if content:
+            para = doc.add_paragraph()
+            run = para.add_run(content)
+            style_mgr.apply_run_style(run, "body")
+
+
+def _render_toc(sections: list[dict], doc: "Document", style_mgr: StyleManager) -> None:
+    """在正文前渲染一个简单的文本目录。"""
+    toc_title = doc.add_paragraph()
+    toc_run = toc_title.add_run("目  录")
+    style_mgr.apply_run_style(toc_run, "heading2")
+    toc_title.alignment = 1  # center
+
+    def _walk(items: list[dict], depth: int = 0):
+        for item in items:
+            number = item.get("number", "")
+            title = item.get("title", "")
+            indent = "    " * depth
+            if depth == 0:
+                line = f"{indent}{number}、{title}" if number else f"{indent}{title}"
+            else:
+                line = f"{indent}{number} {title}" if number else f"{indent}{title}"
+            para = doc.add_paragraph()
+            run = para.add_run(line)
+            style_mgr.apply_run_style(run, "body")
+            if depth == 0:
+                run.bold = True
+            if item.get("type") == "group":
+                _walk(item.get("children", []), depth + 1)
+
+    _walk(sections)
+
+    # 目录与正文之间加空行
+    doc.add_paragraph()
 
 
 def render_format(data: dict, output_path: str) -> None:
@@ -52,30 +124,13 @@ def render_format(data: dict, output_path: str) -> None:
         return
 
     sections = bid_format.get("sections", [])
+
+    # 渲染目录
+    if sections:
+        _render_toc(sections, doc, style_mgr)
+
+    # 渲染正文
     for section in sections:
-        section_type = section.get("type", "")
-        section_title = section.get("title", "")
-
-        # 渲染子标题
-        if section_title:
-            heading_para = doc.add_paragraph()
-            heading_run = heading_para.add_run(section_title)
-            style_mgr.apply_run_style(heading_run, "heading2")
-
-        # 根据类型渲染
-        if section_type in ("key_value_table", "standard_table"):
-            table_builder.build(section, doc)
-        elif section_type == "template":
-            content = section.get("content", "")
-            if content:
-                para = doc.add_paragraph()
-                run = para.add_run(content)
-                style_mgr.apply_run_style(run, "body")
-        elif section_type == "text":
-            content = section.get("content", "")
-            if content:
-                para = doc.add_paragraph()
-                run = para.add_run(content)
-                style_mgr.apply_run_style(run, "body")
+        _render_section(section, doc, style_mgr, table_builder, level=1)
 
     doc.save(output_path)

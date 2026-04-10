@@ -29,10 +29,11 @@ async def list_tasks(
     page: int = 1,
     page_size: int = 20,
     status: str | None = None,
+    q: str | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    items, total = await get_tasks(db, user.id, page, page_size, status)
+    items, total = await get_tasks(db, user.id, page, page_size, status, q)
     return TaskListResponse(items=items, total=total, page=page, page_size=page_size)
 
 
@@ -211,7 +212,13 @@ async def get_parsed(
         raise HTTPException(status_code=404, detail="Parsed file not found")
 
     with open(task.parsed_path, "r", encoding="utf-8") as f:
-        paragraphs = json.load(f)
+        data = json.load(f)
+
+    # parsed.json may be a dict with a "paragraphs" key or a plain list
+    if isinstance(data, dict):
+        paragraphs = data.get("paragraphs", [])
+    else:
+        paragraphs = data
 
     return {"paragraphs": paragraphs}
 

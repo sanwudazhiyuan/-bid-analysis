@@ -8,6 +8,22 @@ if TYPE_CHECKING:
     from docx.document import Document as DocxDocument
 
 
+_UNCLEAR_VALUES = {"未明确", "未提及", "未说明", "未规定", "未要求", "不明确", "待定"}
+
+
+def _is_unclear_row(row: List[str]) -> bool:
+    """判断一行数据的实质内容是否全为"未明确"类占位文本。"""
+    for val in row:
+        s = str(val).strip()
+        # 跳过序号列（纯数字）和空值
+        if not s or s.isdigit():
+            continue
+        if s in _UNCLEAR_VALUES:
+            continue
+        return False
+    return True
+
+
 class TableBuilder:
     """Builds Word tables from structured section dicts.
 
@@ -32,8 +48,11 @@ class TableBuilder:
               ``"standard_table"``
         """
         columns: List[str] = section.get("columns", [])
-        rows: List[List[str]] = section.get("rows", [])
+        rows: List[List[str]] = [r for r in section.get("rows", []) if not _is_unclear_row(r)]
         title: Optional[str] = section.get("title")
+
+        if not rows:
+            return
 
         # ---- optional title paragraph ----
         if title:
@@ -56,6 +75,8 @@ class TableBuilder:
         for row_idx, row_data in enumerate(rows):
             row = table.rows[row_idx + 1]
             for col_idx, value in enumerate(row_data):
+                if col_idx >= num_cols:
+                    break
                 cell = row.cells[col_idx]
                 cell.text = str(value)
                 if self._style_manager is not None:

@@ -13,10 +13,12 @@ from server.app.tasks.celery_app import celery_app
 _sync_db_url = settings.DATABASE_URL.replace("+asyncpg", "")
 _sync_engine = create_engine(_sync_db_url)
 
-_MODULE_KEYS = [
+_PHASE1_KEYS = [
     "module_a", "module_b", "module_c", "module_d", "module_e",
-    "module_f", "module_g", "bid_format", "checklist",
+    "module_f", "module_g",
 ]
+_PHASE2_KEYS = ["bid_format", "checklist"]
+_MODULE_KEYS = _PHASE1_KEYS + _PHASE2_KEYS
 
 
 def _get_task(db: Session, task_id: str):
@@ -62,10 +64,10 @@ def run_pipeline(self, task_id: str):
             task.parsed_path = parsed_path
             db.commit()
 
-        # Layer 2: Index (10-20%)
+        # Layer 2: Index (10-15%)
         self.update_state(
             state="PROGRESS",
-            meta={"step": "indexing", "detail": "构建索引中...", "progress": 15},
+            meta={"step": "indexing", "detail": "构建索引中...", "progress": 12},
         )
         index_result = build_index(paragraphs)
         indexed_path = os.path.join(data_dir, "indexed.json")
@@ -77,27 +79,97 @@ def run_pipeline(self, task_id: str):
             task.indexed_path = indexed_path
             db.commit()
 
-        # Layer 3: Extract (20-90%)
+        # Layer 3: Embedding (15-25%) — 并行计算段落与模块向量
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from src.extractor.embedding import compute_paragraph_embeddings, compute_module_embeddings
+
         api_settings = load_settings()
         tagged = index_result.get("tagged_paragraphs", [])
+
+        self.update_state(
+            state="PROGRESS",
+            meta={"step": "embedding", "detail": "计算向量中...", "progress": 16},
+        )
+
+        with Session(_sync_engine) as db:
+            task = _get_task(db, task_id)
+            task.status = "embedding"
+            db.commit()
+
+        embeddings_map = compute_paragraph_embeddings(tagged, api_settings)
+        module_embeddings = compute_module_embeddings(api_settings)
+
+        self.update_state(
+            state="PROGRESS",
+            meta={"step": "embedding", "detail": "向量计算完成", "progress": 25},
+        )
+
+        with Session(_sync_engine) as db:
+            task = _get_task(db, task_id)
+            task.status = "extracting"
+            db.commit()
+
+        # Layer 4: Extract (25-90%) — 两阶段提取
         modules_result = {}
-        for i, module_key in enumerate(_MODULE_KEYS):
-            progress = 20 + int(70 * i / len(_MODULE_KEYS))
-            self.update_state(
-                state="PROGRESS",
-                meta={
-                    "step": "extracting",
-                    "detail": f"提取 {module_key} [{i + 1}/{len(_MODULE_KEYS)}]",
-                    "progress": progress,
-                    "current_module": module_key,
-                    "modules_done": i,
-                    "modules_total": len(_MODULE_KEYS),
-                },
-            )
+        MAX_EXTRACT_WORKERS = 8
+
+        def _extract_module(module_key: str, extra_kwargs: dict | None = None) -> tuple[str, dict | None]:
             try:
-                modules_result[module_key] = extract_single_module(module_key, tagged, api_settings)
+                kwargs = dict(
+                    embeddings_map=embeddings_map,
+                    module_embeddings=module_embeddings,
+                )
+                if extra_kwargs:
+                    kwargs.update(extra_kwargs)
+                return module_key, extract_single_module(
+                    module_key, tagged, api_settings, **kwargs,
+                )
             except Exception as e:
-                modules_result[module_key] = {"status": "failed", "error": str(e)}
+                return module_key, {"status": "failed", "error": str(e)}
+
+        # Phase 1: module_a~g 并发
+        with ThreadPoolExecutor(max_workers=MAX_EXTRACT_WORKERS) as executor:
+            futures = {executor.submit(_extract_module, mk): mk for mk in _PHASE1_KEYS}
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                module_key, result_data = future.result()
+                modules_result[module_key] = result_data
+                progress = 25 + int(50 * completed / len(_MODULE_KEYS))
+                self.update_state(
+                    state="PROGRESS",
+                    meta={
+                        "step": "extracting",
+                        "detail": f"提取 {module_key} [{completed}/{len(_MODULE_KEYS)}]",
+                        "progress": progress,
+                        "current_module": module_key,
+                        "modules_done": completed,
+                        "modules_total": len(_MODULE_KEYS),
+                    },
+                )
+
+        # Phase 2: bid_format, checklist（bid_format 需要 phase1 结果）
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            phase2_futures = {}
+            for mk in _PHASE2_KEYS:
+                extra = {"modules_context": modules_result} if mk == "bid_format" else None
+                phase2_futures[executor.submit(_extract_module, mk, extra)] = mk
+            for future in as_completed(phase2_futures):
+                completed += 1
+                module_key, result_data = future.result()
+                modules_result[module_key] = result_data
+                progress = 25 + int(65 * completed / len(_MODULE_KEYS))
+                self.update_state(
+                    state="PROGRESS",
+                    meta={
+                        "step": "extracting",
+                        "detail": f"提取 {module_key} [{completed}/{len(_MODULE_KEYS)}]",
+                        "progress": progress,
+                        "current_module": module_key,
+                        "modules_done": completed,
+                        "modules_total": len(_MODULE_KEYS),
+                    },
+                )
 
         extracted = {"schema_version": "1.0", "modules": modules_result}
         extracted_path = os.path.join(data_dir, "extracted.json")

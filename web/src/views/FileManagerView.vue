@@ -76,12 +76,12 @@ async function handleDownload(id: string | number) {
 }
 
 async function handleDelete(id: string | number) {
-  if (!confirm('确定删除此文件？')) return
+  if (!confirm('确定删除此文件？关联的审查记录也会一并删除。')) return
   try {
     await filesApi.delete(props.fileType, id)
     await loadFiles()
-  } catch {
-    // ignore
+  } catch (e: any) {
+    alert(e?.response?.data?.detail || '删除失败，请重试')
   }
 }
 

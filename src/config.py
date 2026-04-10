@@ -47,3 +47,7 @@ def load_tag_rules() -> dict:
 
 def load_styles() -> dict:
     return _load_yaml("styles.yaml")
+
+
+def load_module_descriptions() -> dict:
+    return _load_yaml("module_descriptions.yaml")

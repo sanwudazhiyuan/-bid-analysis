@@ -6,6 +6,7 @@ from src.models import TaggedParagraph
 from src.extractor.base import (
     load_prompt_template,
     build_messages,
+    build_input_text,
     call_qwen,
     estimate_tokens,
     batch_paragraphs,
@@ -24,14 +25,19 @@ _RELEVANT_SECTION_KEYWORDS = [
 ]
 
 
-def _filter_paragraphs(tagged_paragraphs: list[TaggedParagraph]) -> list[TaggedParagraph]:
+def _filter_paragraphs(
+    tagged_paragraphs: list[TaggedParagraph],
+    embeddings_map: dict[int, list[float]] | None = None,
+    module_embedding: list[float] | None = None,
+) -> list[TaggedParagraph]:
     """筛选与项目基本信息相关的段落。
 
     策略：
     1. 段落所属章节标题包含相关关键词
     2. 段落标签与 module_a 相关
     3. 段落文本包含项目信息关键词（采购人、预算、截止时间等）
-    4. 如果筛选太少，取文档前 30% 段落（项目信息通常在文档前部）
+    4. 向量语义匹配补漏
+    5. 如果筛选太少，取文档前 30% 段落（项目信息通常在文档前部）
     """
     text_keywords = [
         "项目名称", "采购编号", "采购人", "预算", "招标人",
@@ -65,6 +71,17 @@ def _filter_paragraphs(tagged_paragraphs: list[TaggedParagraph]) -> list[TaggedP
             selected_indices.add(tp.index)
             continue
 
+    # 向量语义匹配补漏
+    if embeddings_map and module_embedding:
+        from src.extractor.embedding import filter_by_similarity
+        extra = filter_by_similarity(
+            tagged_paragraphs, embeddings_map, module_embedding,
+            exclude_indices=selected_indices,
+        )
+        for tp in extra:
+            selected.append(tp)
+            selected_indices.add(tp.index)
+
     # 如果筛选结果太少，补充文档前 30% 段落
     if len(selected) < 10 and len(tagged_paragraphs) > 0:
         front_count = max(int(len(tagged_paragraphs) * 0.3), 10)
@@ -78,27 +95,23 @@ def _filter_paragraphs(tagged_paragraphs: list[TaggedParagraph]) -> list[TaggedP
     return selected
 
 
-def _build_input_text(paragraphs: list[TaggedParagraph]) -> str:
-    """将筛选后的段落拼接为 LLM 输入文本。"""
-    lines = []
-    for tp in paragraphs:
-        prefix = f"[{tp.index}]"
-        if tp.section_title:
-            prefix += f" [{tp.section_title}]"
-        lines.append(f"{prefix} {tp.text}")
-    return "\n".join(lines)
-
 
 def extract_module_a(
     tagged_paragraphs: list[TaggedParagraph],
     settings: dict | None = None,
+    embeddings_map: dict[int, list[float]] | None = None,
+    module_embedding: list[float] | None = None,
 ) -> dict | None:
     """提取 A. 项目基本信息。
 
     返回结构化 JSON dict，失败时返回 None。
     """
     # 1. 筛选相关段落
-    filtered = _filter_paragraphs(tagged_paragraphs)
+    filtered = _filter_paragraphs(
+        tagged_paragraphs,
+        embeddings_map=embeddings_map,
+        module_embedding=module_embedding,
+    )
     if not filtered:
         logger.warning("module_a: 未筛选到相关段落")
         return None
@@ -109,7 +122,7 @@ def extract_module_a(
     system_prompt = load_prompt_template(str(PROMPT_PATH))
 
     # 3. 构建输入文本
-    input_text = _build_input_text(filtered)
+    input_text = build_input_text(filtered)
     total_tokens = estimate_tokens(input_text)
     logger.info("module_a: 输入文本约 %d tokens", total_tokens)
 

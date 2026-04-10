@@ -17,4 +17,5 @@ celery_app.conf.include = [
     "server.app.tasks.reextract_task",
     "server.app.tasks.generate_task",
     "server.app.tasks.bulk_reextract_task",
+    "server.app.tasks.review_task",
 ]

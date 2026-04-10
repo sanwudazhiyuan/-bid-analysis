@@ -1,6 +1,6 @@
 """Authentication service — user verification + token generation."""
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +14,7 @@ async def authenticate_user(db: AsyncSession, username: str, password: str) -> U
     user = result.scalar_one_or_none()
     if user is None or not verify_password(password, user.password_hash):
         return None
-    user.last_login = datetime.now(timezone.utc)
+    user.last_login = datetime.now()
     await db.commit()
     return user
 

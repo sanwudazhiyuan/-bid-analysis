@@ -27,12 +27,15 @@ def estimate_tokens(text: str) -> int:
 
 # ========== JSON 解析 ==========
 
-def parse_llm_json(raw: str) -> dict | None:
-    """从 LLM 输出中提取 JSON。处理 markdown 代码块包裹、尾部多余文本。"""
+def parse_llm_json(raw: str) -> dict | list | None:
+    """从 LLM 输出中提取 JSON。处理 markdown 代码块包裹、尾部多余文本、常见格式错误。"""
     if not raw or not raw.strip():
         return None
 
     text = raw.strip()
+
+    # 去除 <think>...</think> 思考过程标签
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
     # 尝试提取 markdown 代码块中的 JSON
     md_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
@@ -45,16 +48,86 @@ def parse_llm_json(raw: str) -> dict | None:
     except json.JSONDecodeError:
         pass
 
+    # 修复常见 LLM JSON 错误后重试
+    fixed = _fix_common_json_errors(text)
+    if fixed != text:
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError:
+            pass
+
     # 尝试找到第一个 { 到最后一个 } 的范围
     first_brace = text.find("{")
     last_brace = text.rfind("}")
     if first_brace != -1 and last_brace > first_brace:
+        candidate = text[first_brace : last_brace + 1]
         try:
-            return json.loads(text[first_brace : last_brace + 1])
+            return json.loads(candidate)
         except json.JSONDecodeError:
-            pass
+            candidate = _fix_common_json_errors(candidate)
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
 
+    # 尝试找到第一个 [ 到最后一个 ] 的范围（支持 JSON 数组）
+    first_bracket = text.find("[")
+    last_bracket = text.rfind("]")
+    if first_bracket != -1 and last_bracket > first_bracket:
+        candidate = text[first_bracket : last_bracket + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            candidate = _fix_common_json_errors(candidate)
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+
+    logger.warning("parse_llm_json: failed to extract JSON, raw output: %s", raw[:1000])
     return None
+
+
+def _fix_common_json_errors(text: str) -> str:
+    """修复 LLM 常见的 JSON 格式错误。"""
+    # 去除尾部多余逗号 (trailing commas): }, ] 前面的逗号
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+    # 修复单引号为双引号（仅在键值对场景）
+    # 注意：只处理明显的 JSON key 单引号，避免误改内容
+    text = re.sub(r"(?<=[\[{,])\s*'([^']+?)'\s*:", r' "\1":', text)
+    # 去除控制字符（LLM 偶尔输出 \x00-\x1f）
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+    return text
+
+
+# ========== 输入文本构建 ==========
+
+def build_input_text(paragraphs: list[TaggedParagraph]) -> str:
+    """将筛选后的段落拼接为 LLM 输入文本。
+
+    表格段落（有 table_data）渲染为 markdown 表格格式，
+    确保 LLM 能看到完整的表格内容而非仅表头摘要。
+    """
+    lines = []
+    for tp in paragraphs:
+        prefix = f"[{tp.index}]"
+        if tp.section_title:
+            prefix += f" [{tp.section_title}]"
+
+        if tp.table_data and len(tp.table_data) > 0:
+            # 渲染为 markdown 表格
+            lines.append(f"{prefix} **表格**")
+            header = tp.table_data[0]
+            num_cols = len(header)
+            lines.append("| " + " | ".join(str(c) for c in header) + " |")
+            lines.append("| " + " | ".join(["---"] * num_cols) + " |")
+            for row in tp.table_data[1:]:
+                padded = list(row) + [""] * (num_cols - len(row))
+                lines.append("| " + " | ".join(str(c) for c in padded[:num_cols]) + " |")
+        else:
+            lines.append(f"{prefix} {tp.text}")
+
+    return "\n".join(lines)
 
 
 # ========== 消息构建 ==========
@@ -83,35 +156,72 @@ def _raw_api_call(messages: list[dict], settings: dict) -> str:
     client = OpenAI(
         base_url=api_cfg["base_url"],
         api_key=api_cfg["api_key"],
+        timeout=api_cfg.get("timeout", 300),
+        max_retries=5,
     )
-    response = client.chat.completions.create(
+    kwargs: dict = dict(
         model=api_cfg["model"],
         messages=messages,
         temperature=api_cfg.get("temperature", 0.1),
         max_tokens=api_cfg.get("max_output_tokens", 65536),
     )
+    # DashScope 关闭思考模式
+    if api_cfg.get("enable_thinking") is not None:
+        kwargs["extra_body"] = {"enable_thinking": api_cfg["enable_thinking"]}
+    # 请求 JSON 输出格式（DashScope 兼容 OpenAI response_format）
+    if api_cfg.get("response_format_json", True):
+        kwargs["response_format"] = {"type": "json_object"}
+    try:
+        response = client.chat.completions.create(**kwargs)
+    except Exception:
+        # 某些模型不支持 response_format，降级重试
+        if "response_format" in kwargs:
+            kwargs.pop("response_format")
+            response = client.chat.completions.create(**kwargs)
+        else:
+            raise
     return response.choices[0].message.content
 
 
-def call_qwen(messages: list[dict], settings: dict | None = None) -> dict | None:
-    """调用 DashScope API 并解析返回的 JSON。含重试和限流处理。"""
+def call_qwen(messages: list[dict], settings: dict | None = None) -> dict | list | None:
+    """调用 DashScope API 并解析返回的 JSON。
+
+    当 LLM 返回非 JSON 时，将其回复追加到对话中，要求转为 JSON 再返回。
+    若仍失败则重新发起完整请求。
+    """
     if settings is None:
         settings = load_settings()
 
     max_retries = settings["api"].get("retry", 3)
+    conv = list(messages)  # 工作副本，可追加纠正消息
+
     for attempt in range(max_retries):
         try:
-            raw = _raw_api_call(messages, settings)
+            raw = _raw_api_call(conv, settings)
             logger.debug("LLM raw response (first 200 chars): %s", raw[:200] if raw else "")
             result = parse_llm_json(raw)
             if result is not None:
                 return result
-            logger.warning("Attempt %d: LLM returned non-JSON response", attempt + 1)
+
+            # 非 JSON：追加 LLM 回复 + 严格纠正指令，让同一轮对话修正
+            logger.warning("Attempt %d: LLM returned non-JSON response, asking to convert", attempt + 1)
+            logger.debug("LLM non-JSON output: %s", raw[:500])
+            conv.append({"role": "assistant", "content": raw})
+            conv.append({
+                "role": "user",
+                "content": "格式错误。你的回复不是 JSON。请重新生成结果，严格遵守以下要求：\n"
+                           "1. 只输出 JSON 对象，不要包含任何其他文字、解释、Markdown 标记\n"
+                           "2. 不要输出 <think> 等思考标签\n"
+                           "3. 确保 JSON 格式合法，键名和字符串值使用双引号",
+            })
+
         except Exception as e:
             error_msg = str(e)
             logger.warning("Attempt %d failed: %s", attempt + 1, error_msg)
+            # API 异常时重置对话，避免带着脏上下文重试
+            conv = list(messages)
             if attempt < max_retries - 1:
-                wait = 2 ** attempt
+                wait = 10 * (2 ** attempt)  # 10s, 20s, 40s ...
                 logger.info("Retrying in %ds...", wait)
                 time.sleep(wait)
 

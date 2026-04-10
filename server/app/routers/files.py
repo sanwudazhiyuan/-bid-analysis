@@ -109,6 +109,18 @@ async def delete_file(
             if os.path.exists(gf.file_path):
                 os.remove(gf.file_path)
             await db.delete(gf)
+        # Delete associated review tasks (foreign key constraint)
+        from server.app.models.review_task import ReviewTask
+        review_result = await db.execute(
+            select(ReviewTask).where(ReviewTask.bid_task_id == task.id)
+        )
+        for rt in review_result.scalars().all():
+            # Delete review output files
+            if rt.tender_file_path and os.path.exists(rt.tender_file_path):
+                os.remove(rt.tender_file_path)
+            if rt.annotated_file_path and os.path.exists(rt.annotated_file_path):
+                os.remove(rt.annotated_file_path)
+            await db.delete(rt)
         # Delete uploaded file
         if task.file_path and os.path.exists(task.file_path):
             os.remove(task.file_path)

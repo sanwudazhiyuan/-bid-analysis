@@ -14,6 +14,12 @@ def parse_docx(file_path: str) -> list[Paragraph]:
     paragraphs = []
     idx = 0
 
+    # 构建 style ID → style name 映射表
+    style_id_to_name: dict[str, str] = {}
+    for style in doc.styles:
+        if style.style_id and style.name:
+            style_id_to_name[style.style_id] = style.name
+
     # 按 body 中元素顺序遍历，保持段落和表格的原始位置关系
     from docx.oxml.ns import qn
 
@@ -33,13 +39,14 @@ def parse_docx(file_path: str) -> list[Paragraph]:
             if not text:
                 continue
 
-            # 获取样式
+            # 获取样式（将 style ID 转换为可读的 style name）
             style_name = None
             pPr = element.find(qn("w:pPr"))
             if pPr is not None:
                 pStyle = pPr.find(qn("w:pStyle"))
                 if pStyle is not None:
-                    style_name = pStyle.get(qn("w:val"))
+                    style_id = pStyle.get(qn("w:val"))
+                    style_name = style_id_to_name.get(style_id, style_id)
 
             paragraphs.append(Paragraph(
                 index=idx,

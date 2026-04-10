@@ -11,10 +11,9 @@
 **Spec:** `docs/specs/2026-03-19-bid-document-analyzer-design.md`
 
 **测试用例文档:**
-- 招标原文件: `招标文件解读/（8）20250530（拟发2）2025-2026年信用卡外包制递卡采购项目.doc`
-- 示例-投标文件格式: `招标文件解读/示例文档/投标文件格式.docx`
-- 示例-资料清单: `招标文件解读/示例文档/资料清单.docx`
-- 示例-分析报告: `招标文件解读/示例文档/DeepAnalysis_Analysis_20260319.pdf`
+- 招标原文件: `（8）20250530（拟发2）2025-2026年信用卡外包制递卡采购项目.doc`
+- 测试文档目录（解析效果验证）: `测试文档/` — 包含 7 个 .docx 招标文件
+- 示例输出参考: `示例文档/` — 投标文件格式.docx、资料清单.docx、分析报告 PDF
 
 ---
 
@@ -439,39 +438,51 @@ Expected: 12 tests passed（5 models + 5 config + 2 logger）
 
 ```python
 # tests/test_docx_parser.py
+import glob
+import pytest
 from src.parser.docx_parser import parse_docx
 from src.models import Paragraph
 
+# 测试文档目录下的全部 .docx 文件
+TEST_DOCX_FILES = sorted(glob.glob("测试文档/*.docx"))
+
 def test_parse_docx_returns_paragraphs():
-    """使用示例文档测试 .docx 解析"""
-    result = parse_docx("示例文档/投标文件格式.docx")
+    """使用测试文档测试 .docx 解析"""
+    result = parse_docx("测试文档/招标公告.docx")
     assert isinstance(result, list)
     assert len(result) > 0
     assert all(isinstance(p, Paragraph) for p in result)
 
-def test_parse_docx_has_text():
-    result = parse_docx("示例文档/投标文件格式.docx")
-    texts = [p.text for p in result if p.text.strip()]
-    assert any("投标" in t for t in texts)
-
 def test_parse_docx_has_tables():
-    result = parse_docx("示例文档/投标文件格式.docx")
+    result = parse_docx("测试文档/【招标文件】中国建设银行天津市分行社保卡便携式即时制卡机项目（发布版）.docx")
     tables = [p for p in result if p.is_table]
     assert len(tables) > 0
 
 def test_parse_docx_preserves_style_info():
     """验证样式字段被正确填充（即使值为 None，字段应存在）"""
-    result = parse_docx("示例文档/投标文件格式.docx")
+    result = parse_docx("测试文档/招标公告.docx")
     for p in result:
         assert hasattr(p, "style")  # 字段必须存在
 
 def test_parse_docx_table_data():
-    result = parse_docx("示例文档/投标文件格式.docx")
+    result = parse_docx("测试文档/【招标文件】中国建设银行天津市分行社保卡便携式即时制卡机项目（发布版）.docx")
     tables = [p for p in result if p.is_table and p.table_data]
     if tables:
         first_table = tables[0]
         assert isinstance(first_table.table_data, list)
         assert isinstance(first_table.table_data[0], list)
+
+@pytest.mark.parametrize("docx_path", TEST_DOCX_FILES, ids=lambda p: p.split("/")[-1].split("\\")[-1])
+def test_parse_all_test_documents(docx_path):
+    """对 测试文档/ 下每个 .docx 验证：可解析、有段落、有中文"""
+    result = parse_docx(docx_path)
+    assert isinstance(result, list), f"{docx_path} 返回类型错误"
+    assert len(result) > 0, f"{docx_path} 解析后段落数为0"
+    texts = [p.text for p in result if p.text.strip()]
+    assert len(texts) > 0, f"{docx_path} 无有效文本"
+    # 招标文件必定包含中文
+    has_chinese = any(any('\u4e00' <= c <= '\u9fff' for c in t) for t in texts)
+    assert has_chinese, f"{docx_path} 未检测到中文内容"
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -666,11 +677,14 @@ git commit -m "feat: implement PDF parser"
 
 ```python
 # tests/test_unified_parser.py
+import glob
 import pytest
 from src.parser.unified import parse_document
 
+TEST_DOCX_FILES = sorted(glob.glob("测试文档/*.docx"))
+
 def test_parse_docx():
-    result = parse_document("示例文档/投标文件格式.docx")
+    result = parse_document("测试文档/招标公告.docx")
     assert len(result) > 0
 
 def test_parse_doc():
@@ -680,6 +694,12 @@ def test_parse_doc():
 def test_parse_unsupported_format():
     with pytest.raises(ValueError, match="不支持的文件格式"):
         parse_document("test.txt")
+
+@pytest.mark.parametrize("docx_path", TEST_DOCX_FILES, ids=lambda p: p.split("/")[-1].split("\\")[-1])
+def test_unified_parse_all_test_documents(docx_path):
+    """统一接口对 测试文档/ 下每个文件均能成功解析"""
+    result = parse_document(docx_path)
+    assert len(result) > 0, f"{docx_path} 解析后段落数为0"
 ```
 
 - [ ] **Step 2: 实现统一接口**
@@ -876,11 +896,20 @@ git commit -m "feat: add JSON persistence for parsed and indexed results"
 ### Phase 2 验收测试
 
 **验收标准：**
-1. `parse_document("xxx.docx")` 返回 >10 个段落，包含中文文本
-2. `parse_document("xxx.doc")` 返回 >50 个段落（完整招标文件），包含表格
+1. **测试文档全量通过**：`测试文档/` 目录下全部 7 个 .docx 文件均能成功解析为 `List[Paragraph]`，段落数 > 0，包含中文内容
+2. `.doc 解析`：`parse_document("（8）...项目.doc")` 返回 >50 个段落，包含表格和中文
 3. 三种格式的输出均为 `List[Paragraph]`，字段完整
 4. 错误格式抛出 `ValueError`
 5. `save_parsed` / `load_parsed` 能正确序列化/反序列化，中文无乱码
+
+**测试文档清单（必须全部通过）：**
+- `测试文档/【招标文件】中国建设银行天津市分行社保卡便携式即时制卡机项目（发布版）.docx`
+- `测试文档/【招标文件】甘肃银行借记IC空白卡及个人化外包服务采购项目-终稿.docx`
+- `测试文档/分散采购比选文件（社保卡移动制卡机具采购）.docx`
+- `测试文档/招标公告.docx`
+- `测试文档/招标文件-2025-A-01-044-信用卡制卡工艺及寄送项目（二次招标）.docx`
+- `测试文档/普洱市人民医院医保刷脸终端设备采购（单一来源）.docx`
+- `测试文档/河北省农村信用社联合社智慧银行等自助设备入围项目交流公告.docx`
 
 ```bash
 pytest tests/ -v -k "parser or unified or persistence"

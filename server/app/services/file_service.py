@@ -31,9 +31,9 @@ async def list_files(
 
 
 async def _list_bid_documents(db, user_id, page, page_size, q):
-    base = select(Task).where(Task.user_id == user_id, Task.status == "completed")
+    base = select(Task).where(Task.user_id == user_id)
     count_base = select(func.count()).select_from(Task).where(
-        Task.user_id == user_id, Task.status == "completed"
+        Task.user_id == user_id,
     )
     if q:
         base = base.where(Task.filename.ilike(f"%{q}%"))
@@ -48,7 +48,7 @@ async def _list_bid_documents(db, user_id, page, page_size, q):
         {
             "id": str(t.id), "filename": t.filename, "file_size": t.file_size,
             "created_at": t.created_at.isoformat() if t.created_at else None,
-            "task_name": t.filename,
+            "task_name": t.filename, "status": t.status,
         }
         for t in tasks
     ]
