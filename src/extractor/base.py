@@ -84,6 +84,7 @@ def parse_llm_json(raw: str) -> dict | list | None:
             except json.JSONDecodeError:
                 pass
 
+    logger.warning("parse_llm_json: failed to extract JSON, raw output: %s", raw[:1000])
     return None
 
 
@@ -97,6 +98,36 @@ def _fix_common_json_errors(text: str) -> str:
     # 去除控制字符（LLM 偶尔输出 \x00-\x1f）
     text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
     return text
+
+
+# ========== 输入文本构建 ==========
+
+def build_input_text(paragraphs: list[TaggedParagraph]) -> str:
+    """将筛选后的段落拼接为 LLM 输入文本。
+
+    表格段落（有 table_data）渲染为 markdown 表格格式，
+    确保 LLM 能看到完整的表格内容而非仅表头摘要。
+    """
+    lines = []
+    for tp in paragraphs:
+        prefix = f"[{tp.index}]"
+        if tp.section_title:
+            prefix += f" [{tp.section_title}]"
+
+        if tp.table_data and len(tp.table_data) > 0:
+            # 渲染为 markdown 表格
+            lines.append(f"{prefix} **表格**")
+            header = tp.table_data[0]
+            num_cols = len(header)
+            lines.append("| " + " | ".join(str(c) for c in header) + " |")
+            lines.append("| " + " | ".join(["---"] * num_cols) + " |")
+            for row in tp.table_data[1:]:
+                padded = list(row) + [""] * (num_cols - len(row))
+                lines.append("| " + " | ".join(str(c) for c in padded[:num_cols]) + " |")
+        else:
+            lines.append(f"{prefix} {tp.text}")
+
+    return "\n".join(lines)
 
 
 # ========== 消息构建 ==========
@@ -134,6 +165,9 @@ def _raw_api_call(messages: list[dict], settings: dict) -> str:
         temperature=api_cfg.get("temperature", 0.1),
         max_tokens=api_cfg.get("max_output_tokens", 65536),
     )
+    # DashScope 关闭思考模式
+    if api_cfg.get("enable_thinking") is not None:
+        kwargs["extra_body"] = {"enable_thinking": api_cfg["enable_thinking"]}
     # 请求 JSON 输出格式（DashScope 兼容 OpenAI response_format）
     if api_cfg.get("response_format_json", True):
         kwargs["response_format"] = {"type": "json_object"}
@@ -169,12 +203,16 @@ def call_qwen(messages: list[dict], settings: dict | None = None) -> dict | list
             if result is not None:
                 return result
 
-            # 非 JSON：追加 LLM 回复 + 纠正指令，让同一轮对话修正
+            # 非 JSON：追加 LLM 回复 + 严格纠正指令，让同一轮对话修正
             logger.warning("Attempt %d: LLM returned non-JSON response, asking to convert", attempt + 1)
+            logger.debug("LLM non-JSON output: %s", raw[:500])
             conv.append({"role": "assistant", "content": raw})
             conv.append({
                 "role": "user",
-                "content": "你的回复不是合法的 JSON 格式。请将上面的内容严格转换为 JSON 格式返回，不要包含任何多余的解释文字。",
+                "content": "格式错误。你的回复不是 JSON。请重新生成结果，严格遵守以下要求：\n"
+                           "1. 只输出 JSON 对象，不要包含任何其他文字、解释、Markdown 标记\n"
+                           "2. 不要输出 <think> 等思考标签\n"
+                           "3. 确保 JSON 格式合法，键名和字符串值使用双引号",
             })
 
         except Exception as e:

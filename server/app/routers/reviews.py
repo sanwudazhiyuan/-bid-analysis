@@ -19,10 +19,11 @@ router = APIRouter(prefix="/api/reviews", tags=["reviews"])
 async def create_review_endpoint(
     tender_file: UploadFile = File(...),
     bid_task_id: str = Form(...),
+    review_mode: str = Form("fixed"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    review = await create_review(db, tender_file, bid_task_id, user.id)
+    review = await create_review(db, tender_file, bid_task_id, user.id, review_mode=review_mode)
     # Dispatch Celery task
     from server.app.tasks.review_task import run_review
     celery_result = run_review.delay(str(review.id))
@@ -52,6 +53,7 @@ async def list_reviews_endpoint(
                 "tender_filename": r.tender_filename,
                 "version": r.version,
                 "status": r.status,
+                "review_mode": r.review_mode,
                 "review_summary": r.review_summary,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             }
@@ -82,6 +84,7 @@ async def get_review_endpoint(
         "version": review.version,
         "status": review.status,
         "progress": review.progress,
+        "review_mode": review.review_mode,
         "review_summary": review.review_summary,
         "review_items": review.review_items,
         "created_at": review.created_at.isoformat() if review.created_at else None,

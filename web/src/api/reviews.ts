@@ -33,6 +33,7 @@ export interface ReviewTask {
   tender_filename: string
   version: number
   status: string
+  review_mode: 'fixed' | 'smart'
   progress: number
   current_step: string | null
   error_message: string | null
@@ -42,10 +43,11 @@ export interface ReviewTask {
 }
 
 export const reviewsApi = {
-  create(bidTaskId: string, tenderFile: File) {
+  create(bidTaskId: string, tenderFile: File, reviewMode: 'fixed' | 'smart' = 'fixed') {
     const form = new FormData()
     form.append('bid_task_id', bidTaskId)
     form.append('tender_file', tenderFile)
+    form.append('review_mode', reviewMode)
     return client.post<{ id: string; status: string; version: number }>('/reviews', form)
   },
   list(page = 1, pageSize = 20, q?: string) {

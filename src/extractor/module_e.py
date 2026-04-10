@@ -9,6 +9,7 @@ from src.models import TaggedParagraph
 from src.extractor.base import (
     load_prompt_template,
     build_messages,
+    build_input_text,
     call_qwen,
     estimate_tokens,
     batch_paragraphs,
@@ -89,15 +90,6 @@ def _filter_paragraphs(
     return selected
 
 
-def _build_input_text(paragraphs: list[TaggedParagraph]) -> str:
-    lines = []
-    for tp in paragraphs:
-        prefix = f"[{tp.index}]"
-        if tp.section_title:
-            prefix += f" [{tp.section_title}]"
-        lines.append(f"{prefix} {tp.text}")
-    return "\n".join(lines)
-
 
 def extract_module_e(
     tagged_paragraphs: list[TaggedParagraph],
@@ -118,7 +110,7 @@ def extract_module_e(
     logger.info("module_e: 筛选到 %d 个相关段落 (共 %d)", len(filtered), len(tagged_paragraphs))
 
     system_prompt = load_prompt_template(str(PROMPT_PATH))
-    input_text = _build_input_text(filtered)
+    input_text = build_input_text(filtered)
     total_tokens = estimate_tokens(input_text)
     logger.info("module_e: 输入文本约 %d tokens", total_tokens)
 
@@ -128,7 +120,7 @@ def extract_module_e(
         batches = batch_paragraphs(filtered, max_tokens=120000)
         results = []
         for i, batch in enumerate(batches):
-            batch_text = _build_input_text(batch)
+            batch_text = build_input_text(batch)
             messages = build_messages(system=system_prompt, user=batch_text)
             batch_result = call_qwen(messages, settings)
             if batch_result:

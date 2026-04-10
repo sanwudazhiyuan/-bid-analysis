@@ -1,17 +1,17 @@
 // haha-code/server.ts — 轻量 HTTP 服务封装，提供 /review 端点供 server 调用
 import { join } from "path";
-import { appendFileSync, mkdirSync } from "fs";
+import { appendFileSync, mkdirSync, existsSync } from "fs";
 
 const PORT = parseInt(process.env.HAHA_CODE_PORT || "3000", 10);
 const ROOT_DIR = import.meta.dir;
 const CLI_PATH = join(ROOT_DIR, "src", "entrypoints", "cli.tsx");
 const REVIEW_TIMEOUT = parseInt(process.env.REVIEW_TIMEOUT_MS || "600000", 10); // 10 min
 
-// 错误日志目录：保存每次智能体退出的完整 stderr/stdout，用于事后诊断
-const ERROR_LOG_DIR = join(ROOT_DIR, "logs");
-const ERROR_LOG_FILE = join(ERROR_LOG_DIR, "review-errors.log");
+// 日志目录：保存错误日志和工具调用流摘要
+const LOG_DIR = join(ROOT_DIR, "logs");
+const ERROR_LOG_FILE = join(LOG_DIR, "review-errors.log");
 try {
-  mkdirSync(ERROR_LOG_DIR, { recursive: true });
+  mkdirSync(LOG_DIR, { recursive: true });
 } catch {}
 
 interface ReviewRequest {
@@ -24,6 +24,7 @@ interface ReviewRequest {
   };
   folder_path: string;
   project_context: string;
+  tender_context: string;
 }
 
 interface ReviewResult {
@@ -35,10 +36,11 @@ interface ReviewResult {
     text_snippet: string;
     reason: string;
   }>;
+  recoverable?: boolean;
 }
 
 function buildPrompt(req: ReviewRequest): string {
-  return `请使用 /bid-review skill 审查以下条款。
+  let prompt = `请使用 /bid-review skill 审查以下条款。
 
 ## 条款信息
 - 条款内容：${req.clause.clause_text}
@@ -47,15 +49,27 @@ function buildPrompt(req: ReviewRequest): string {
 
 ## 项目背景
 ${req.project_context}
+`;
 
-## 投标文件位置
+  if (req.tender_context) {
+    prompt += `
+## 相关招标原文参考
+以下是从招标文件中预提取的、与该条款相关的原文片段，用于帮助理解条款的背景和要求。请结合条款内容进行判断，仅在与条款确实相关时才参考这些内容：
+
+${req.tender_context}
+
+`;
+  }
+
+  prompt += `## 投标文件位置
 文件夹路径：${req.folder_path}
 
 请先调用 /bid-review skill，skill 会自动读取投标文件文件夹进行审查。如果 skill 未被自动触发，请手动输入 /bid-review 后跟随上述条款信息。`;
+  return prompt;
 }
 
 function parseResult(stdout: string): ReviewResult {
-  // 尝试从输出中提取 JSON
+  // 从输出中提取 JSON
   const jsonMatch = stdout.match(/\{[\s\S]*"result"[\s\S]*\}/);
   if (jsonMatch) {
     try {
@@ -76,11 +90,6 @@ function parseResult(stdout: string): ReviewResult {
   };
 }
 
-/**
- * 分析智能体退出的 stderr 输出，返回结构化的错误信息。
- * 关键改进：不再只返回 "exit N"，而是从 stderr 中提取根因，
- * 并标记该错误是否可通过重试解决。
- */
 function analyzeExitError(exitCode: number, stderr: string, stdout: string): {
   reason: string;
   recoverable: boolean;
@@ -180,6 +189,24 @@ const server = Bun.serve({
       return Response.json({ status: "ok" });
     }
 
+    // Static file server: serve images from tender_folder for URL-based image references
+    // e.g. /files/data/reviews/xxx/tender_folder/images/img001.jpg
+    if (url.pathname.startsWith("/files/")) {
+      const filePath = decodeURIComponent(url.pathname.slice("/files/".length));
+      // Security: only allow files under /data/
+      if (!filePath.startsWith("data/") && !filePath.startsWith("/data/")) {
+        return Response.json({ error: "Forbidden" }, { status: 403 });
+      }
+      const absPath = filePath.startsWith("/") ? filePath : "/" + filePath;
+      if (!existsSync(absPath)) {
+        return Response.json({ error: "Not found" }, { status: 404 });
+      }
+      const file = Bun.file(absPath);
+      return new Response(file, {
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+      });
+    }
+
     // Review endpoint
     if (url.pathname === "/review" && req.method === "POST") {
       try {
@@ -194,7 +221,7 @@ const server = Bun.serve({
 
         const prompt = buildPrompt(body);
 
-        // 调用 haha-code CLI
+        // 调用 haha-code CLI（不使用 stream-json verbose，会超限 6MB 请求体）
         const proc = Bun.spawn(
           [
             "bun",
@@ -206,8 +233,10 @@ const server = Bun.serve({
             body.folder_path,
             "--allowedTools",
             "Read Glob Grep",
+            "--max-turns",
+            "100",
             "--system-prompt",
-            "你是资深招标审查专家。请调用 /bid-review skill 进行审查。先阅读 _图片索引.md 了解所有可用图片。遇到图片（.png/.jpg等）必须使用 Read 工具查看图片内容。严格只输出 JSON 结果。",
+            "你是资深招标审查专家。请调用 /bid-review skill 进行审查。先阅读 _图片索引.md 了解所有图片的 AI 预描述。图片描述已嵌入 MD 文件，无需读取原始图片。严格只输出 JSON 结果。",
           ],
           {
             cwd: ROOT_DIR,
@@ -239,7 +268,75 @@ const server = Bun.serve({
           });
         }
 
-        const result = parseResult(stdout);
+        // 尝试解析 JSON，失败时重新发送 JSON 修正 prompt
+        let result = parseResult(stdout);
+        if (result.result === "error" && result.reason.startsWith("智能体输出解析失败")) {
+          console.log("[haha-code] JSON parse failed, retrying with repair prompt...");
+          const repairPrompt = `你之前的审查输出格式不正确，请将审查结果转换为以下 JSON 格式输出，不要包含任何其他内容：
+
+{
+  "result": "pass" | "fail" | "warning",
+  "confidence": 0-100,
+  "reason": "审查结论的理由",
+  "locations": [
+    {
+      "para_index": 段落编号,
+      "text_snippet": "相关原文片段",
+      "reason": "为什么该片段与条款相关"
+    }
+  ]
+}
+
+以下是你之前的审查输出：
+${stdout.slice(0, 5000)}
+
+请只输出 JSON，不要包含任何其他文字。`;
+
+          const repairProc = Bun.spawn(
+            [
+              "bun",
+              "--env-file=.env",
+              CLI_PATH,
+              "-p",
+              repairPrompt,
+              "--add-dir",
+              body.folder_path,
+              "--allowedTools",
+              "Read Glob Grep",
+              "--max-turns",
+              "20",
+              "--system-prompt",
+              "你是招标审查助手。请将已有的审查结果转换为 JSON 格式输出。严格只输出 JSON。",
+            ],
+            {
+              cwd: ROOT_DIR,
+              stdout: "pipe",
+              stderr: "pipe",
+              env: { ...process.env },
+            }
+          );
+
+          const repairTimeout = setTimeout(() => repairProc.kill(), REVIEW_TIMEOUT);
+          const repairStdout = await new Response(repairProc.stdout).text();
+          clearTimeout(repairTimeout);
+
+          const repairExitCode = await repairProc.exited;
+          if (repairExitCode !== 0) {
+            console.log(`[haha-code] Repair attempt failed with exit code ${repairExitCode}`);
+            return Response.json({
+              result: "error",
+              confidence: 0,
+              reason: `智能体输出解析失败: ${stdout.slice(0, 200)}`,
+              locations: [],
+            });
+          }
+
+          result = parseResult(repairStdout);
+          if (result.result === "error" && result.reason.startsWith("智能体输出解析失败")) {
+            console.log("[haha-code] JSON repair still failed after retry");
+          }
+        }
+
         return Response.json(result);
       } catch (e: any) {
         console.error("Review error:", e);

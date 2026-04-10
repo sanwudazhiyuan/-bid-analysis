@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     DATA_DIR: str = "/data"
     MAX_UPLOAD_SIZE: int = 500 * 1024 * 1024  # 500MB
     ALLOWED_EXTENSIONS: list[str] = [".doc", ".docx", ".pdf"]
+    HAHA_CODE_URL: str = "http://haha-code:3000"
 
 
 settings = Settings()

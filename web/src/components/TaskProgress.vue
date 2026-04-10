@@ -11,6 +11,7 @@ onMounted(connect)
 const steps = [
   { key: 'parsing', label: '文档解析' },
   { key: 'indexing', label: '智能索引' },
+  { key: 'embedding', label: '向量计算' },
   { key: 'extracting', label: '结构提取' },
   { key: 'generating', label: '文档生成' },
 ]

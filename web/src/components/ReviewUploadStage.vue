@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { Search, Upload, ShieldCheck } from 'lucide-vue-next'
+import { Search, Upload, ShieldCheck, Sparkles } from 'lucide-vue-next'
 import client from '../api/client'
 import { useReviewStore } from '../stores/reviewStore'
 
@@ -109,6 +109,39 @@ async function startReview() {
           </label>
         </p>
         <p v-if="tenderFile" class="mt-2 text-sm text-text-primary">{{ tenderFile.name }}</p>
+      </div>
+    </div>
+
+    <!-- Review mode selector -->
+    <div class="space-y-2">
+      <label class="text-sm text-text-secondary">审核模式</label>
+      <div class="grid grid-cols-2 gap-3">
+        <button
+          class="flex items-center gap-2 px-4 py-3 border rounded-lg text-sm transition-colors"
+          :class="reviewStore.reviewMode === 'fixed'
+            ? 'border-success bg-success/10 text-success'
+            : 'border-border text-text-secondary hover:border-text-muted'"
+          @click="reviewStore.reviewMode = 'fixed'"
+        >
+          <ShieldCheck class="size-4" />
+          <div class="text-left">
+            <div class="font-medium">固定审核</div>
+            <div class="text-xs opacity-70">规则映射 + LLM 逐条审查</div>
+          </div>
+        </button>
+        <button
+          class="flex items-center gap-2 px-4 py-3 border rounded-lg text-sm transition-colors"
+          :class="reviewStore.reviewMode === 'smart'
+            ? 'border-success bg-success/10 text-success'
+            : 'border-border text-text-secondary hover:border-text-muted'"
+          @click="reviewStore.reviewMode = 'smart'"
+        >
+          <Sparkles class="size-4" />
+          <div class="text-left">
+            <div class="font-medium">智能审核</div>
+            <div class="text-xs opacity-70">AI 智能体自主导航审查</div>
+          </div>
+        </button>
       </div>
     </div>
 

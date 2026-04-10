@@ -15,7 +15,7 @@ RUN useradd -m -r appuser && mkdir -p /data/uploads /data/generated /data/review
 # Install Python dependencies
 COPY server/requirements.txt /app/server/requirements.txt
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt -r server/requirements.txt
+RUN pip install --no-cache-dir --timeout=120 -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt -r server/requirements.txt
 
 # Copy source code
 COPY src/ /app/src/

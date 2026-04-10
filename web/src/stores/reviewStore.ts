@@ -14,12 +14,13 @@ export const useReviewStore = defineStore('review', () => {
   const detail = ref('')
   const reviewSummary = ref<ReviewSummary | null>(null)
   const reviewItems = ref<ReviewItem[]>([])
+  const reviewMode = ref<'fixed' | 'smart'>('fixed')
   const error = ref<string | null>(null)
 
   async function startReview(bidTaskId: string, tenderFile: File) {
     error.value = null
     try {
-      const res = await reviewsApi.create(bidTaskId, tenderFile)
+      const res = await reviewsApi.create(bidTaskId, tenderFile, reviewMode.value)
       currentReviewId.value = res.data.id
       localStorage.setItem('current_review_id', res.data.id)
       stage.value = 'processing'
@@ -33,6 +34,10 @@ export const useReviewStore = defineStore('review', () => {
   const REVIEW_STEP_LABELS: Record<string, string> = {
     indexing: '索引',
     extracting: '条款提取',
+    mapping: '条款映射',
+    describing: '图片描述',
+    building: '构建文件夹',
+    reviewing: '审查',
     p0_review: '废标审查',
     p1_review: '资格审查',
     p2_review: '评分审查',
@@ -82,6 +87,9 @@ export const useReviewStore = defineStore('review', () => {
       const statusMap: Record<string, ReviewStage> = {
         pending: 'processing',
         indexing: 'processing',
+        describing: 'processing',
+        building: 'processing',
+        mapping: 'processing',
         reviewing: 'processing',
         completed: 'preview',
         failed: 'upload',
@@ -100,6 +108,7 @@ export const useReviewStore = defineStore('review', () => {
     selectedBidTask.value = null
     currentReviewId.value = null
     localStorage.removeItem('current_review_id')
+    reviewMode.value = 'fixed'
     progress.value = 0
     currentStep.value = ''
     detail.value = ''
@@ -109,7 +118,7 @@ export const useReviewStore = defineStore('review', () => {
   }
 
   return {
-    stage, selectedBidTask, currentReviewId, progress, currentStep, detail,
+    stage, selectedBidTask, currentReviewId, reviewMode, progress, currentStep, detail,
     reviewSummary, reviewItems, error,
     startReview, handleProgressEvent, loadReviewResult, loadReviewState, resetToUpload,
   }

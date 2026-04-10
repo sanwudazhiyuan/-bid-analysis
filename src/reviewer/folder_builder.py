@@ -3,10 +3,34 @@ import os
 import re
 import shutil
 import logging
+from PIL import Image
 
 from src.models import Paragraph
 
 logger = logging.getLogger(__name__)
+
+# 图片压缩配置：限制单图尺寸，避免 agent 读取多张图片时累积超过 6MB
+COMPRESSED_MAX_DIM = 800  # 最大宽高
+COMPRESSED_JPEG_QUALITY = 70  # JPEG 质量
+
+
+def _compress_image_for_folder(src_path: str, dst_path: str):
+    """复制图片时预压缩，限制尺寸和质量。
+
+    确保单张图片压缩后 < 200KB，即使 agent 读取多张也不会累积超限。
+    """
+    try:
+        with Image.open(src_path) as img:
+            # 限制尺寸
+            img.thumbnail((COMPRESSED_MAX_DIM, COMPRESSED_MAX_DIM), Image.LANCZOS)
+            # 统一转为 JPEG 以减小体积
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+            img.save(dst_path, "JPEG", quality=COMPRESSED_JPEG_QUALITY, optimize=True)
+    except Exception:
+        # 压缩失败时直接复制原图
+        logger.warning("Failed to compress image %s, copying as-is", src_path)
+        shutil.copy2(src_path, dst_path)
 
 _UNSAFE_RE = re.compile(r'[<>:"/\\|?*]')
 
@@ -21,28 +45,44 @@ def _sanitize_filename(name: str) -> str:
 def _build_leaf_md(
     title: str,
     paragraphs: list[Paragraph],
-    images: list[dict],
+    image_descriptions: dict[int, list[str]],
+    image_filenames: dict[int, list[str]],
     images_rel_prefix: str = "images",
 ) -> str:
     """为叶子节点生成 Markdown 内容。
 
-    每个段落以 [Pxxx] 标记，图片以 ![图片](<prefix>/xxx.png) 引用。
-    images_rel_prefix 是从当前 MD 文件到根目录 images/ 的相对路径。
+    每个段落以 [Pxxx] 标记，图片包含：
+    1. AI 预描述文本（优先阅读，纯文本无需 API 调用）
+    2. 图片文件引用（描述不足时 agent 读取压缩版图片）
+
+    表格段落额外渲染为 Markdown 表格格式。
     """
     lines = [f"# {title}", ""]
 
-    # 图片按 near_para_index 分组
-    image_by_para: dict[int, list[str]] = {}
-    for img in images:
-        pi = img.get("near_para_index")
-        if pi is not None:
-            image_by_para.setdefault(pi, []).append(img["filename"])
-
     for p in paragraphs:
-        lines.append(f"[P{p.index}] {p.text}")
-        # 在段落后插入该段落关联的图片
-        for fn in image_by_para.get(p.index, []):
+        if p.is_table and p.table_data:
+            # 渲染为 Markdown 表格
+            lines.append(f"[P{p.index}] **表格**")
+            # 表头
+            header = p.table_data[0] if p.table_data else []
+            sep = ["---"] * len(header)
+            lines.append("| " + " | ".join(str(c) for c in header) + " |")
+            lines.append("| " + " | ".join(sep) + " |")
+            # 数据行
+            for row in p.table_data[1:]:
+                padded = row + [""] * (len(header) - len(row))
+                lines.append("| " + " | ".join(str(c) for c in padded[:len(header)]) + " |")
+        else:
+            lines.append(f"[P{p.index}] {p.text}")
+
+        # 先插入 AI 图片描述
+        for desc in image_descriptions.get(p.index, []):
+            lines.append(f"> [图片描述] {desc}")
+
+        # 再插入图片文件引用（fallback，图片已预压缩）
+        for fn in image_filenames.get(p.index, []):
             lines.append(f"![图片]({images_rel_prefix}/{fn})")
+
         lines.append("")
 
     return "\n".join(lines)
@@ -72,18 +112,25 @@ def _build_toc_md(chapters: list[dict]) -> str:
 def build_tender_folder(
     paragraphs: list[Paragraph],
     tender_index: dict,
+    image_descriptions: dict[str, str],
+    image_para_map: dict[int, list[str]],
+    image_para_files: dict[int, list[str]],
     extracted_images: list[dict],
     output_dir: str,
 ) -> str:
     """将投标文件按章节树生成文件夹结构。
 
-    图片统一存放在 output_dir/images/，MD 中用相对路径引用。
-    父节点如果有子节点未覆盖的段落，生成 _概述.md。
+    图片包含两种形式：
+    1. AI 预描述文本：嵌入 MD 文件，智能体优先阅读
+    2. 图片文件：保留原图，描述不足时可 fallback 读取
 
     Args:
         paragraphs: 投标文件段落列表
         tender_index: 章节树（含 chapters）
-        extracted_images: 已提取的图片信息 [{filename, path, near_para_index}]
+        image_descriptions: {filename: description} 映射
+        image_para_map: {para_index: [description, ...]} 按段落分组的图片描述
+        image_para_files: {para_index: [filename, ...]} 按段落分组的图片文件名
+        extracted_images: 原始图片信息 [{filename, path, near_para_index}]
         output_dir: 输出根目录
 
     Returns:
@@ -95,30 +142,37 @@ def build_tender_folder(
 
     chapters = tender_index.get("chapters", [])
 
-    # 图片按 near_para_index 分组
-    image_by_para: dict[int, list[dict]] = {}
-    for img in extracted_images:
-        pi = img.get("near_para_index")
-        if pi is not None:
-            image_by_para.setdefault(pi, []).append(img)
+    # 构建原始文件名 → 压缩后文件名 的映射
+    filename_map: dict[str, str] = {}
 
-    # 统一复制所有图片到 output_dir/images/
+    # 复制所有图片到 output_dir/images/（预压缩作为 fallback）
     if extracted_images:
         img_root = os.path.join(output_dir, "images")
         os.makedirs(img_root, exist_ok=True)
         for img in extracted_images:
             src = img.get("path", "")
             if src and os.path.isfile(src):
-                dst = os.path.join(img_root, img["filename"])
-                shutil.copy2(src, dst)
+                orig_name = img["filename"]
+                base_name = os.path.splitext(orig_name)[0]
+                compressed_name = base_name + ".jpg"
+                dst = os.path.join(img_root, compressed_name)
+                _compress_image_for_folder(src, dst)
+                filename_map[orig_name] = compressed_name
+
+    def _map_filenames(orig_files: dict[int, list[str]]) -> dict[int, list[str]]:
+        """将原始文件名映射为压缩后的 .jpg 文件名。"""
+        return {
+            pi: [filename_map.get(fn, fn) for fn in fns]
+            for pi, fns in orig_files.items()
+        }
+
+    compressed_file_map = _map_filenames(image_para_files)
 
     def _images_rel_prefix(depth: int) -> str:
-        """根据 MD 文件所在深度计算到根 images/ 的相对路径。"""
         if depth == 0:
             return "images"
         return "/".join([".."] * depth) + "/images"
 
-    # 递归生成文件夹
     def _write_node(node: dict, parent_dir: str, depth: int = 0):
         title = node["title"]
         safe_title = _sanitize_filename(title)
@@ -127,34 +181,29 @@ def build_tender_folder(
         end = node.get("end_para", 0)
 
         if children:
-            # 非叶子：创建子目录
             node_dir = os.path.join(parent_dir, safe_title)
             os.makedirs(node_dir, exist_ok=True)
 
-            # 检查父节点是否有子节点未覆盖的段落
             children_start = min(c.get("start_para", 0) for c in children)
             if start < children_start:
                 intro_paras = [p for p in paragraphs if start <= p.index < children_start]
                 if intro_paras:
-                    intro_images = []
-                    for p in intro_paras:
-                        intro_images.extend(image_by_para.get(p.index, []))
+                    intro_desc = {p.index: image_para_map[p.index] for p in intro_paras if p.index in image_para_map}
+                    intro_files = {p.index: compressed_file_map[p.index] for p in intro_paras if p.index in compressed_file_map}
                     prefix = _images_rel_prefix(depth + 1)
-                    md = _build_leaf_md(f"{title} 概述", intro_paras, intro_images, prefix)
+                    md = _build_leaf_md(f"{title} 概述", intro_paras, intro_desc, intro_files, prefix)
                     with open(os.path.join(node_dir, "_概述.md"), "w", encoding="utf-8") as f:
                         f.write(md)
 
             for child in children:
                 _write_node(child, node_dir, depth + 1)
         else:
-            # 叶子：生成 MD 文件
             node_paras = [p for p in paragraphs if start <= p.index <= end]
-            node_images = []
-            for p in node_paras:
-                node_images.extend(image_by_para.get(p.index, []))
+            node_desc = {p.index: image_para_map[p.index] for p in node_paras if p.index in image_para_map}
+            node_files = {p.index: compressed_file_map[p.index] for p in node_paras if p.index in compressed_file_map}
 
             prefix = _images_rel_prefix(depth)
-            md_content = _build_leaf_md(title, node_paras, node_images, prefix)
+            md_content = _build_leaf_md(title, node_paras, node_desc, node_files, prefix)
             md_path = os.path.join(parent_dir, f"{safe_title}.md")
             with open(md_path, "w", encoding="utf-8") as f:
                 f.write(md_content)
@@ -167,52 +216,35 @@ def build_tender_folder(
     with open(os.path.join(output_dir, "_目录.md"), "w", encoding="utf-8") as f:
         f.write(toc_content)
 
-    # 生成图片索引文件：为智能体提供全局图片清单
-    if extracted_images:
-        image_index_content = _build_image_index_md(extracted_images, paragraphs)
+    # 生成图片索引文件
+    if image_descriptions:
+        image_index_content = _build_image_index_md(image_descriptions)
         with open(os.path.join(output_dir, "_图片索引.md"), "w", encoding="utf-8") as f:
             f.write(image_index_content)
 
-    logger.info("Tender folder built at %s with %d chapters, %d images", output_dir, len(chapters), len(extracted_images))
+    logger.info(
+        "Tender folder built at %s with %d chapters, %d images, %d descriptions",
+        output_dir, len(chapters), len(extracted_images), len(image_descriptions),
+    )
     return output_dir
 
 
 def _build_image_index_md(
-    extracted_images: list[dict],
-    paragraphs: list,
+    image_descriptions: dict[str, str],
 ) -> str:
-    """生成全局图片索引文件，列出所有图片及其关联的段落上下文。
-
-    每个图片条目包含：
-    - 文件名和格式
-    - 关联的段落索引 [Pxxx] 和文本片段
-    - Markdown 引用路径
-    """
+    """生成全局图片索引文件，列出所有图片及其 AI 描述。"""
     lines = ["# 图片索引", ""]
-    lines.append(f"共 {len(extracted_images)} 张图片。审查时请逐一使用 Read 工具查看。")
+    lines.append(f"共 {len(image_descriptions)} 张图片。")
+    lines.append("图片已预先描述为文字并嵌入对应章节的 MD 文件中。")
+    lines.append("如 AI 描述不够详细，可使用 Read 工具读取原始图片。")
     lines.append("")
 
-    para_map = {p.index: p.text for p in paragraphs}
-
-    for i, img in enumerate(extracted_images, 1):
-        fn = img["filename"]
-        ext = os.path.splitext(fn)[1].lower()
-        near_pi = img.get("near_para_index")
-
+    for i, (fn, desc) in enumerate(image_descriptions.items(), 1):
         lines.append(f"## {i}. `{fn}`")
-        lines.append(f"- 格式: {ext.lstrip('.').upper()}")
-        lines.append(f"- 路径: `images/{fn}`")
-
-        if near_pi is not None and near_pi in para_map:
-            text_snippet = para_map[near_pi][:100]
-            lines.append(f"- 关联段落: [P{near_pi}] {text_snippet}")
-        elif near_pi is not None:
-            lines.append(f"- 关联段落索引: P{near_pi}（段落文本为空或已脱敏）")
-        else:
-            lines.append(f"- 关联段落: 无（独立图片）")
-
+        lines.append(f"{desc}")
         lines.append("")
 
     lines.append("---")
-    lines.append("**重要**: 审查签字盖章、营业执照、资质证书等条款时，必须逐一查看相关图片。")
+    lines.append("**重要**: 审查签字盖章、营业执照、资质证书等条款时，请优先阅读嵌入在 MD 文件中的图片描述。")
+    lines.append("如描述信息不足以判定，再使用 Read 工具查看原始图片。")
     return "\n".join(lines)

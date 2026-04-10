@@ -1,6 +1,7 @@
 """中间结果持久化：JSON 序列化/反序列化各层输出"""
 
 import json
+import os
 from datetime import datetime
 from src.models import Paragraph, TaggedParagraph
 
@@ -17,8 +18,13 @@ def _check_version(data: dict, path: str):
         )
 
 
+def _ensure_dir(path: str):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+
 def save_parsed(paragraphs: list[Paragraph], path: str):
     """保存 Layer 1 解析结果"""
+    _ensure_dir(path)
     data = {
         "schema_version": CURRENT_SCHEMA_VERSION,
         "generated_at": datetime.now().isoformat(),
@@ -38,6 +44,7 @@ def load_parsed(path: str) -> list[Paragraph]:
 
 def save_indexed(index_result: dict, path: str):
     """保存 Layer 2 索引结果"""
+    _ensure_dir(path)
     data = {
         "schema_version": CURRENT_SCHEMA_VERSION,
         "generated_at": datetime.now().isoformat(),
@@ -64,6 +71,7 @@ def load_indexed(path: str) -> dict:
 
 def save_extracted(extracted: dict, path: str):
     """保存 Layer 3 提取结果"""
+    _ensure_dir(path)
     extracted["generated_at"] = datetime.now().isoformat()
     if "schema_version" not in extracted:
         extracted["schema_version"] = CURRENT_SCHEMA_VERSION
@@ -81,6 +89,7 @@ def load_extracted(path: str) -> dict:
 
 def save_reviewed(reviewed: dict, path: str):
     """保存 Layer 4 校对结果"""
+    _ensure_dir(path)
     reviewed["reviewed_at"] = datetime.now().isoformat()
     with open(path, "w", encoding="utf-8") as f:
         json.dump(reviewed, f, ensure_ascii=False, indent=2)

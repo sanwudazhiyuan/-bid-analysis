@@ -12,7 +12,7 @@ embedding:
   model: "text-embedding-v3"
   dimensions: 1024
   batch_size: 10
-  max_workers: 16
+  max_workers: 4
   similarity_threshold: 0.5
 
 output:

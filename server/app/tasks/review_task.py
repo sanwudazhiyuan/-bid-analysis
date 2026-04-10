@@ -3,7 +3,7 @@ import logging
 import time
 import uuid as _uuid
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from server.app.config import settings
@@ -147,19 +147,69 @@ def run_review(self, review_id: str):
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
             if review_mode == "smart":
-                # ── 智能审核模式：构建文件夹 → haha-code 逐条审查 ──
+                # ── 智能审核模式：图片预描述 → 条款映射 → 构建文件夹 → haha-code 逐条审查 ──
                 from src.reviewer.folder_builder import build_tender_folder
+                from src.reviewer.image_describer import describe_images
                 from src.reviewer.smart_reviewer import call_smart_review
+                from src.reviewer.clause_mapper import llm_map_clauses_to_leaf_nodes
+                from src.reviewer.bid_context import build_bid_chapter_index, extract_bid_context_for_clauses
 
-                # Step 4s: 构建投标文件文件夹结构 (12-15%)
-                self.update_state(state="PROGRESS", meta={"step": "extracting", "progress": 12, "detail": "构建文件夹"})
-                review.progress = 12
-                review.current_step = "构建文件夹结构"
+                # Step 4s-1: 图片预描述 (5-8%)
+                self.update_state(state="PROGRESS", meta={"step": "describing", "progress": 5, "detail": "图片预描述"})
+                review.progress = 5
+                review.current_step = "图片预描述"
                 db.commit()
 
                 import os
+                api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+                image_descriptions = describe_images(api_key, extracted_images) if extracted_images else {}
+
+                # 按段落分组图片描述和图片文件名
+                image_para_map: dict[int, list[str]] = {}
+                image_para_files: dict[int, list[str]] = {}
+                for img in extracted_images:
+                    pi = img.get("near_para_index")
+                    if pi is not None:
+                        desc = image_descriptions.get(img["filename"], "")
+                        if desc:
+                            image_para_map.setdefault(pi, []).append(desc)
+                        image_para_files.setdefault(pi, []).append(img["filename"])
+
+                # Step 4s-2: 条款→招标文件章节映射 (8-11%)
+                # 智能审核：映射到招标文件章节，提取招标原文作为条款上下文
+                # （agent 会自行浏览投标文件夹，不需要预提取投标文件内容）
+                self.update_state(state="PROGRESS", meta={"step": "mapping", "progress": 8, "detail": "条款映射（招标原文）"})
+                review.progress = 8
+                review.current_step = "条款映射（招标原文）"
+                db.commit()
+
+                # 从招标解读的 indexed.json 构建招标文件章节索引
+                bid_indexed_data = _load_bid_indexed_data(bid_task)
+                bid_chapter_index = build_bid_chapter_index(bid_indexed_data)
+
+                clause_contexts: dict[int, str] = {}
+                if bid_chapter_index["chapters"]:
+                    mapping_settings = {**load_settings()}
+                    mapping_settings["api"] = {**mapping_settings["api"], "model": "qwen3.5-flash"}
+                    clause_mapping = llm_map_clauses_to_leaf_nodes(clauses, bid_chapter_index, mapping_settings)
+                    clause_contexts = extract_bid_context_for_clauses(
+                        clause_mapping, bid_chapter_index, bid_tagged_paragraphs,
+                    )
+                else:
+                    logger.warning("招标文件章节索引为空，跳过条款映射")
+
+                # Step 4s-3: 构建文件夹结构 (11-14%)
+                self.update_state(state="PROGRESS", meta={"step": "building", "progress": 11, "detail": "构建文件夹"})
+                review.progress = 11
+                review.current_step = "构建文件夹结构"
+                db.commit()
+
                 folder_dir = os.path.join(os.path.dirname(review.tender_file_path), "tender_folder")
-                build_tender_folder(paragraphs, tender_index, extracted_images, folder_dir)
+                build_tender_folder(
+                    paragraphs, tender_index,
+                    image_descriptions, image_para_map, image_para_files,
+                    extracted_images, folder_dir,
+                )
                 logger.info("Tender folder built at %s", folder_dir)
 
                 # Step 5s-7s: 并发智能审查 (15-95%)
@@ -169,7 +219,8 @@ def run_review(self, review_id: str):
 
                 with ThreadPoolExecutor(max_workers=SMART_MAX_WORKERS) as executor:
                     for clause in all_clauses:
-                        future = executor.submit(call_smart_review, clause, folder_dir, project_context)
+                        tender_context = clause_contexts.get(clause["clause_index"], "")
+                        future = executor.submit(call_smart_review, clause, folder_dir, project_context, tender_context)
                         futures[future] = clause
 
                     completed = 0
@@ -179,13 +230,26 @@ def run_review(self, review_id: str):
                         progress = clause_progress_start + int(
                             (clause_progress_end - clause_progress_start) * completed / max(len(all_clauses), 1)
                         )
-                        review.progress = progress
-                        review.current_step = f"智能审查 [{completed}/{len(all_clauses)}]"
-                        db.commit()
+                        # 同步更新 Celery 和数据库进度（前端刷新时从 DB 读取）
                         self.update_state(state="PROGRESS", meta={
                             "step": "reviewing", "progress": progress,
-                            "detail": review.current_step,
+                            "detail": f"智能审查 [{completed}/{len(all_clauses)}]",
                         })
+                        review.progress = progress
+                        review.current_step = f"智能审查 [{completed}/{len(all_clauses)}]"
+                        if completed % 5 == 0 or completed == len(all_clauses):
+                            try:
+                                with _sync_engine.connect() as conn:
+                                    conn.execute(
+                                        text(
+                                            "UPDATE review_tasks SET progress = :progress, "
+                                            "current_step = :step WHERE id = :id"
+                                        ),
+                                        {"progress": progress, "step": review.current_step, "id": review.id},
+                                    )
+                                    conn.commit()
+                            except Exception:
+                                pass
 
                         try:
                             result = future.result()
@@ -345,13 +409,26 @@ def run_review(self, review_id: str):
                         progress = clause_progress_start + int(
                             (clause_progress_end - clause_progress_start) * completed / max(len(all_clauses), 1)
                         )
-                        review.progress = progress
-                        review.current_step = f"审查 [{completed}/{len(all_clauses)}]"
-                        db.commit()
+                        # 同步更新 Celery 和数据库进度
                         self.update_state(state="PROGRESS", meta={
                             "step": "reviewing", "progress": progress,
-                            "detail": review.current_step,
+                            "detail": f"审查 [{completed}/{len(all_clauses)}]",
                         })
+                        review.progress = progress
+                        review.current_step = f"审查 [{completed}/{len(all_clauses)}]"
+                        if completed % 5 == 0 or completed == len(all_clauses):
+                            try:
+                                with _sync_engine.connect() as conn:
+                                    conn.execute(
+                                        text(
+                                            "UPDATE review_tasks SET progress = :progress, "
+                                            "current_step = :step WHERE id = :id"
+                                        ),
+                                        {"progress": progress, "step": review.current_step, "id": review.id},
+                                    )
+                                    conn.commit()
+                            except Exception:
+                                pass
 
                         try:
                             result = future.result()
@@ -408,9 +485,20 @@ def run_review(self, review_id: str):
 
         except Exception as e:
             logger.error("Review task failed: %s", e, exc_info=True)
-            review.status = "failed"
-            review.error_message = str(e)
-            db.commit()
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            # 重新加载 review 对象，避免 StaleDataError
+            db.expire_all()
+            try:
+                review = db.get(ReviewTask, _uuid.UUID(review_id))
+                if review:
+                    review.status = "failed"
+                    review.error_message = str(e)
+                    db.commit()
+            except Exception:
+                pass
             return {"error": str(e)}
 
 
@@ -448,6 +536,21 @@ def _ensure_bid_complete(bid_task, db: Session):
             db.commit()
 
     raise TimeoutError("等待招标文件解析超时（30分钟）")
+
+
+def _load_bid_indexed_data(bid_task) -> dict:
+    """从招标解读的索引结果中加载完整 indexed.json 数据（含 sections）。"""
+    import json
+
+    indexed_path = bid_task.indexed_path
+    if not indexed_path:
+        return {}
+    try:
+        with open(indexed_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        logger.warning("Failed to load bid indexed data from %s", indexed_path, exc_info=True)
+        return {}
 
 
 def _load_bid_tagged_paragraphs(bid_task) -> list:

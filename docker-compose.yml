@@ -55,6 +55,29 @@ services:
       interval: 30s
       retries: 3
 
+  haha-code:
+    build:
+      context: ./haha-code
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      ANTHROPIC_AUTH_TOKEN: ${DASHSCOPE_API_KEY:-}
+      ANTHROPIC_BASE_URL: https://dashscope.aliyuncs.com/apps/anthropic
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: qwen3.5-flash
+      ANTHROPIC_DEFAULT_OPUS_MODEL: qwen3.6-plus
+      ANTHROPIC_DEFAULT_SONNET_MODEL: qwen3.5-plus
+      ANTHROPIC_MODEL: qwen3.6-plus
+      API_TIMEOUT_MS: "3000000"
+      REVIEW_TIMEOUT_MS: "900000"
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      DISABLE_TELEMETRY: "1"
+    volumes:
+      - filedata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      retries: 5
+
   worker:
     build:
       context: .
@@ -65,6 +88,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://biduser:${DB_PASSWORD:-devpassword}@postgres:5432/bid_analyzer
       REDIS_URL: redis://redis:6379/0
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      HAHA_CODE_URL: http://haha-code:3000
     volumes:
       - filedata:/data
       - ./src:/app/src
@@ -73,6 +97,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+      haha-code: { condition: service_healthy }
 
   nginx:
     build:

@@ -15,7 +15,8 @@ ALLOWED_EXT = {ext.lower() for ext in settings.ALLOWED_EXTENSIONS}
 
 
 async def create_review(
-    db: AsyncSession, tender_file: UploadFile, bid_task_id: str, user_id: int
+    db: AsyncSession, tender_file: UploadFile, bid_task_id: str, user_id: int,
+    review_mode: str = "fixed",
 ) -> ReviewTask:
     """Create a review task: validate bid_task, save file, compute version."""
     # Validate bid_task
@@ -71,6 +72,7 @@ async def create_review(
         version=version,
         status="pending",
         progress=0,
+        review_mode=review_mode,
     )
     db.add(review)
     await db.commit()

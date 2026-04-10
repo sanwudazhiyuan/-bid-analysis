@@ -8,7 +8,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 HAHA_CODE_URL = os.environ.get("HAHA_CODE_URL", "http://haha-code:3000")
-REVIEW_TIMEOUT = int(os.environ.get("SMART_REVIEW_TIMEOUT", "600"))  # 10 min
+REVIEW_TIMEOUT = int(os.environ.get("SMART_REVIEW_TIMEOUT", "900"))  # 15 min
 SMART_REVIEW_RETRIES = int(os.environ.get("SMART_REVIEW_RETRIES", "2"))
 
 
@@ -16,8 +16,15 @@ def call_smart_review(
     clause: dict,
     folder_path: str,
     project_context: str,
+    tender_context: str = "",
 ) -> dict:
     """调用 haha-code 智能审核服务审查单个条款。
+
+    Args:
+        clause: 条款信息
+        folder_path: 投标文件文件夹路径
+        project_context: 项目背景
+        tender_context: 预提取的相关原文（可为空，为空时 agent 自行搜索）
 
     返回格式与 llm_review_clause 一致的 review item dict。
     失败时自动重试，指数退避。
@@ -33,6 +40,7 @@ def call_smart_review(
         },
         "folder_path": folder_path,
         "project_context": project_context,
+        "tender_context": tender_context,
     }
 
     last_error = None
@@ -64,7 +72,7 @@ def call_smart_review(
 
         if attempt < SMART_REVIEW_RETRIES:
             wait = 5 * (2 ** attempt)  # 5s, 10s
-            logger.info("Retrying smart review for clause %d in %ds...", clause["clause_index"], wait)
+            logger.info("Retrying smart review for clause %d in %ds... reason: %s", clause["clause_index"], wait, last_error)
             time.sleep(wait)
 
     return _error_item(clause, f"智能审核失败（已重试{SMART_REVIEW_RETRIES}次）: {last_error}")

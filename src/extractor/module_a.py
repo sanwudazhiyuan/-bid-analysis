@@ -6,6 +6,7 @@ from src.models import TaggedParagraph
 from src.extractor.base import (
     load_prompt_template,
     build_messages,
+    build_input_text,
     call_qwen,
     estimate_tokens,
     batch_paragraphs,
@@ -94,16 +95,6 @@ def _filter_paragraphs(
     return selected
 
 
-def _build_input_text(paragraphs: list[TaggedParagraph]) -> str:
-    """将筛选后的段落拼接为 LLM 输入文本。"""
-    lines = []
-    for tp in paragraphs:
-        prefix = f"[{tp.index}]"
-        if tp.section_title:
-            prefix += f" [{tp.section_title}]"
-        lines.append(f"{prefix} {tp.text}")
-    return "\n".join(lines)
-
 
 def extract_module_a(
     tagged_paragraphs: list[TaggedParagraph],
@@ -131,7 +122,7 @@ def extract_module_a(
     system_prompt = load_prompt_template(str(PROMPT_PATH))
 
     # 3. 构建输入文本
-    input_text = _build_input_text(filtered)
+    input_text = build_input_text(filtered)
     total_tokens = estimate_tokens(input_text)
     logger.info("module_a: 输入文本约 %d tokens", total_tokens)
 

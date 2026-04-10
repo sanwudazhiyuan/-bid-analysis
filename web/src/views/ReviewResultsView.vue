@@ -66,6 +66,11 @@ function resultSummaryText(r: ReviewTask) {
     </div>
 
     <div v-if="loading" class="text-center text-text-muted py-12">加载中...</div>
+    <div v-else-if="items.length === 0" class="text-center py-16">
+      <div class="border border-dashed border-border rounded-lg p-8 text-text-muted text-sm">
+        暂无审查记录，请在「标书审查」中创建审查任务
+      </div>
+    </div>
     <div v-else class="space-y-2">
       <div
         v-for="item in items" :key="item.id"
@@ -73,8 +78,9 @@ function resultSummaryText(r: ReviewTask) {
       >
         <div class="flex-1 min-w-0">
           <div class="text-sm font-medium text-text-primary truncate">{{ item.bid_filename }} → {{ item.tender_filename }}</div>
-          <div class="text-xs text-text-muted mt-0.5">
-            版本{{ item.version }} · {{ item.created_at }} · {{ resultSummaryText(item) }}
+          <div class="text-xs text-text-muted mt-0.5 flex items-center gap-1.5">
+            <span v-if="item.review_mode === 'smart'" class="inline-block px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-[10px] font-medium">智能</span>
+            <span>版本{{ item.version }} · {{ item.created_at }} · {{ resultSummaryText(item) }}</span>
           </div>
         </div>
         <div class="flex gap-1.5">

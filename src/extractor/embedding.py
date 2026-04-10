@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MODEL = "text-embedding-v3"
 _DEFAULT_DIMENSIONS = 1024
 _DEFAULT_BATCH_SIZE = 10
-_DEFAULT_MAX_WORKERS = 16
+_DEFAULT_MAX_WORKERS = 4
 _DEFAULT_THRESHOLD = 0.5
 
 

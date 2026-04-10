@@ -23,6 +23,7 @@ class ReviewTask(Base):
     tender_file_path: Mapped[str] = mapped_column(String(1000), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
+    review_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="fixed")
     progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     current_step: Mapped[str | None] = mapped_column(String(200))
     error_message: Mapped[str | None] = mapped_column(Text)

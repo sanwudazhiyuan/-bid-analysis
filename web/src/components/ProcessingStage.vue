@@ -4,6 +4,7 @@ import { FileText } from 'lucide-vue-next'
 const defaultSteps = [
   { key: 'parsing', label: '解析' },
   { key: 'indexing', label: '索引' },
+  { key: 'embedding', label: '向量' },
   { key: 'extracting', label: '提取' },
   { key: 'generating', label: '生成' },
 ]
@@ -25,15 +26,59 @@ const emit = defineEmits<{
 const steps = props.customSteps || defaultSteps
 
 const modeLabels = {
-  processing: '解析中',
+  processing: '处理中',
   reprocessing: '修改中',
   generating: '生成中',
 }
 
 function stepStatus(stepKey: string) {
   const order = steps.map(s => s.key)
-  const currentIdx = order.indexOf(props.step)
   const stepIdx = order.indexOf(stepKey)
+
+  // 尝试多种匹配方式找到当前步骤索引
+  let currentIdx = order.indexOf(props.step)
+
+  // 方法1: 用 step label 反向匹配（如"索引"→"indexing"）
+  if (currentIdx === -1 && props.step) {
+    const matchIdx = steps.findIndex(s =>
+      s.label === props.step || props.step.includes(s.label),
+    )
+    if (matchIdx !== -1) currentIdx = matchIdx
+  }
+
+  // 方法2: 关键词匹配
+  if (currentIdx === -1 && props.step) {
+    const keywordMap: Record<string, string> = {
+      '索引': 'indexing',
+      '图片': 'describing',
+      '构建': 'building',
+      '提取': 'extracting',
+      '映射': 'mapping',
+      '审查': 'reviewing',
+      '生成': 'generating',
+    }
+    for (const [kw, key] of Object.entries(keywordMap)) {
+      if (props.step.includes(kw)) {
+        const idx = steps.findIndex(s => s.key === key)
+        if (idx !== -1) { currentIdx = idx; break }
+      }
+    }
+  }
+
+  // 方法3: 进度推断 fallback
+  if (currentIdx === -1) {
+    let activeByProgress = 0
+    if (props.progress >= 95) activeByProgress = steps.findIndex(s => s.key === 'generating')
+    else if (props.progress >= 15) activeByProgress = steps.findIndex(s => s.key === 'reviewing')
+    else if (props.progress >= 13) activeByProgress = steps.findIndex(s => s.key === 'building')
+    else if (props.progress >= 12) activeByProgress = steps.findIndex(s => s.key === 'mapping')
+    else if (props.progress >= 10) activeByProgress = steps.findIndex(s => s.key === 'extracting')
+    else if (props.progress >= 7) activeByProgress = steps.findIndex(s => s.key === 'describing')
+    else if (props.progress >= 5) activeByProgress = steps.findIndex(s => s.key === 'indexing')
+    if (activeByProgress < 0) activeByProgress = 0
+    currentIdx = activeByProgress
+  }
+
   if (stepIdx < currentIdx) return 'done'
   if (stepIdx === currentIdx) return 'active'
   return 'pending'
