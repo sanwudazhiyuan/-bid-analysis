@@ -6,6 +6,7 @@ from typing import Optional
 class Paragraph:
     index: int
     text: str
+    source_file: str = ""  # 来自哪个源文件
     style: Optional[str] = None
     is_table: bool = False
     table_data: Optional[list] = None

@@ -22,3 +22,24 @@ def parse_document(file_path: str) -> list[Paragraph]:
         return parse_pdf(file_path)
     else:
         raise ValueError(f"不支持的文件格式: {ext}")
+
+
+def parse_documents(file_paths: list[str]) -> list[Paragraph]:
+    """依次解析多个文件，合并段落列表。
+
+    每个段落增加 source_file 标记，后续管线无需修改。
+    不支持的格式在对应文件上抛出 ValueError。
+    """
+    all_paragraphs: list[Paragraph] = []
+    global_idx = 0
+
+    for file_path in file_paths:
+        filename = Path(file_path).name
+        paragraphs = parse_document(file_path)
+        for p in paragraphs:
+            p.source_file = filename
+            p.index = global_idx
+            global_idx += 1
+            all_paragraphs.append(p)
+
+    return all_paragraphs
