@@ -34,3 +34,5 @@ class Task(Base):
 
     annotations = relationship("Annotation", back_populates="task", cascade="all, delete-orphan")
     generated_files = relationship("GeneratedFile", back_populates="task", cascade="all, delete-orphan")
+    files = relationship("TaskFile", back_populates="task", cascade="all, delete-orphan",
+                         order_by="TaskFile.sort_order")
