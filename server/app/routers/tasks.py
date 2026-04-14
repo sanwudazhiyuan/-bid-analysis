@@ -8,6 +8,7 @@ import uuid as _uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.app.database import get_db
@@ -48,6 +49,8 @@ async def upload_and_create_task(
 ):
     """上传第一个文件，创建 pending 状态的 Task（不启动管线）。"""
     task = await create_task_from_upload(db, file, user.id)
+    # Eagerly load files relationship for response serialization
+    await db.refresh(task, ["files"])
     return task
 
 
@@ -180,6 +183,7 @@ async def get_task_detail(
     task = await get_task(db, task_id, user.id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+    await db.refresh(task, ["files"])
     return task
 
 

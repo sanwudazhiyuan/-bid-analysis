@@ -5,6 +5,7 @@ import shutil
 import uuid
 from fastapi import UploadFile, HTTPException
 from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.app.config import settings
@@ -163,7 +164,7 @@ async def _get_user_task(db: AsyncSession, task_id: str, user_id: int) -> Task |
     except ValueError:
         return None
     result = await db.execute(
-        select(Task).where(Task.id == task_uuid, Task.user_id == user_id)
+        select(Task).options(selectinload(Task.files)).where(Task.id == task_uuid, Task.user_id == user_id)
     )
     return result.scalar_one_or_none()
 
@@ -177,7 +178,7 @@ async def get_tasks(
     q: str | None = None,
 ) -> tuple[list, int]:
     """Unchanged — list tasks with pagination."""
-    query = select(Task).where(Task.user_id == user_id).order_by(Task.created_at.desc())
+    query = select(Task).options(selectinload(Task.files)).where(Task.user_id == user_id).order_by(Task.created_at.desc())
     count_query = select(func.count()).select_from(Task).where(Task.user_id == user_id)
     if status:
         query = query.where(Task.status == status)
@@ -199,7 +200,7 @@ async def get_task(db: AsyncSession, task_id: str, user_id: int) -> Task | None:
     except ValueError:
         return None
     result = await db.execute(
-        select(Task).where(Task.id == task_uuid, Task.user_id == user_id)
+        select(Task).options(selectinload(Task.files)).where(Task.id == task_uuid, Task.user_id == user_id)
     )
     return result.scalar_one_or_none()
 

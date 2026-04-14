@@ -3,6 +3,7 @@
 import os
 import html as _html
 import uuid as _uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -221,14 +222,17 @@ def _para_to_html(para) -> str:
 
     # Alignment
     align = ""
-    if para.alignment is not None:
-        from docx.enum.text import WD_ALIGN_PARAGRAPH
-        align_map = {
-            WD_ALIGN_PARAGRAPH.CENTER: "center",
-            WD_ALIGN_PARAGRAPH.RIGHT: "right",
-            WD_ALIGN_PARAGRAPH.JUSTIFY: "justify",
-        }
-        align = align_map.get(para.alignment, "")
+    try:
+        if para.alignment is not None:
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+            align_map = {
+                WD_ALIGN_PARAGRAPH.CENTER: "center",
+                WD_ALIGN_PARAGRAPH.RIGHT: "right",
+                WD_ALIGN_PARAGRAPH.JUSTIFY: "justify",
+            }
+            align = align_map.get(para.alignment, "")
+    except (ValueError, AttributeError):
+        pass  # LibreOffice-converted docs may have non-standard alignment values
 
     # Indentation
     indent_style = ""
@@ -310,13 +314,59 @@ def _docx_to_html(file_path: str) -> str:
 
 
 def _doc_to_html(file_path: str) -> str:
-    """Convert a .doc file to HTML via LibreOffice temp conversion."""
+    """Convert a .doc file to HTML via LibreOffice temp conversion, fallback to antiword."""
     import tempfile
-    from src.parser.doc_parser import _convert_doc_to_docx
+    import subprocess
+
+    soffice = None
+    for path in ["soffice", "/usr/bin/soffice"]:
+        try:
+            subprocess.run([path, "--version"], capture_output=True, check=True)
+            soffice = path
+            break
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+
+    if not soffice:
+        return _doc_to_html_fallback(file_path)
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        docx_path = _convert_doc_to_docx(file_path, tmp_dir)
-        return _docx_to_html(docx_path)
+        doc_abs = str(Path(file_path).resolve())
+        cmd = [soffice, "--headless", "--convert-to", "docx", "--outdir", tmp_dir, doc_abs]
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        if result.returncode != 0:
+            return _doc_to_html_fallback(file_path)
+        stem = Path(file_path).stem
+        docx_path = Path(tmp_dir) / f"{stem}.docx"
+        if not docx_path.exists():
+            return _doc_to_html_fallback(file_path)
+        return _docx_to_html(str(docx_path))
+        return _docx_to_html(str(docx_path))
+
+
+def _doc_to_html_fallback(file_path: str) -> str:
+    """Fallback: use antiword for .doc preview."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["antiword", file_path],
+            capture_output=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            return f"<p>antiword 解析失败: {_html.escape(result.stderr.decode('utf-8', errors='replace'))}</p>"
+        text = result.stdout.decode("utf-8", errors="replace")
+        parts = []
+        for line in text.split("\n"):
+            line = line.strip()
+            if line:
+                parts.append(f'<p style="margin:2px 0;font-size:14px">{_html.escape(line)}</p>')
+        return "\n".join(parts) if parts else "<p>文档内容为空</p>"
+    except FileNotFoundError:
+        return "<p>antiword 未安装，无法预览 .doc 文件</p>"
+    except subprocess.TimeoutExpired:
+        return "<p>解析超时</p>"
 
 
 def _pdf_to_html(file_path: str) -> str:

@@ -6,8 +6,12 @@ WORKDIR /app
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
     sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true
 
-# Install system dependencies (antiword for .doc parsing)
-RUN apt-get update && apt-get install -y --no-install-recommends antiword && rm -rf /var/lib/apt/lists/*
+# Install system dependencies (antiword for .doc parsing, LibreOffice for .doc conversion)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    antiword \
+    libreoffice-writer \
+    fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user and data directory
 RUN useradd -m -r appuser && mkdir -p /data/uploads /data/generated /data/reviews && chown -R appuser:appuser /data
