@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { tasksApi } from '../api/tasks'
-import type { ProgressEvent } from '../types/task'
+import type { TaskFile, ProgressEvent } from '../types/task'
 
 export type AnalysisStage = 'upload' | 'processing' | 'review' | 'reprocessing' | 'generating' | 'preview'
 
@@ -12,6 +12,7 @@ export const useAnalysisStore = defineStore('analysis', () => {
   const currentStep = ref('')
   const extractedData = ref<Record<string, any> | null>(null)
   const error = ref<string | null>(null)
+  const uploadedFiles = ref<TaskFile[]>([])
 
   async function startUpload(file: File) {
     error.value = null
@@ -19,11 +20,48 @@ export const useAnalysisStore = defineStore('analysis', () => {
       const res = await tasksApi.upload(file)
       currentTaskId.value = res.data.id
       localStorage.setItem('current_task_id', res.data.id)
-      stage.value = 'processing'
+      // DON'T switch stage — stay on upload, wait for confirm
       progress.value = 0
+      uploadedFiles.value = [{
+        id: res.data.id,
+        filename: res.data.filename,
+        file_size: res.data.file_size,
+        is_primary: true,
+        sort_order: 0,
+      }]
     } catch (e: any) {
       error.value = e.response?.data?.detail || '上传失败'
       throw e
+    }
+  }
+
+  async function uploadAdditionalFile(file: File) {
+    if (!currentTaskId.value) throw new Error('No active task')
+    error.value = null
+    try {
+      const res = await tasksApi.uploadFile(currentTaskId.value, file)
+      uploadedFiles.value.push(res.data)
+    } catch (e: any) {
+      error.value = e.response?.data?.detail || '上传失败'
+      throw e
+    }
+  }
+
+  function removeUploadedFile(index: number) {
+    if (index === 0) throw new Error('Cannot remove primary file')
+    uploadedFiles.value.splice(index, 1)
+    uploadedFiles.value.forEach((f, i) => { f.sort_order = i })
+  }
+
+  async function startParsing() {
+    if (!currentTaskId.value) return
+    error.value = null
+    try {
+      await tasksApi.confirm(currentTaskId.value)
+      stage.value = 'processing'
+      progress.value = 0
+    } catch (e: any) {
+      error.value = e.response?.data?.detail || '启动解析失败'
     }
   }
 
@@ -73,6 +111,7 @@ export const useAnalysisStore = defineStore('analysis', () => {
       progress.value = task.progress
 
       const statusMap: Record<string, AnalysisStage> = {
+        pending: 'upload',  // pending tasks stay in upload stage
         review: 'review',
         generating: 'generating',
         reprocessing: 'reprocessing',
@@ -91,12 +130,14 @@ export const useAnalysisStore = defineStore('analysis', () => {
     currentStep.value = ''
     extractedData.value = null
     error.value = null
+    uploadedFiles.value = []
     localStorage.removeItem('current_task_id')
   }
 
   return {
-    stage, currentTaskId, progress, currentStep, extractedData, error,
-    startUpload, handleProgressEvent, skipReview, submitAnnotations,
+    stage, currentTaskId, progress, currentStep, extractedData, error, uploadedFiles,
+    startUpload, uploadAdditionalFile, removeUploadedFile, startParsing,
+    handleProgressEvent, skipReview, submitAnnotations,
     loadTaskState, resetToUpload,
   }
 })
