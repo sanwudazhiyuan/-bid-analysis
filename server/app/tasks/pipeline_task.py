@@ -29,7 +29,7 @@ def _get_task(db: Session, task_id: str):
 @celery_app.task(bind=True, name="run_pipeline")
 def run_pipeline(self, task_id: str):
     """执行完整分析管线，逐模块上报进度。"""
-    from src.parser.unified import parse_document
+    from src.parser.unified import parse_documents
     from src.indexer.indexer import build_index
     from src.extractor.extractor import extract_single_module
     from src.persistence import save_parsed, save_indexed, save_extracted
@@ -41,8 +41,8 @@ def run_pipeline(self, task_id: str):
             return {"error": "Task not found"}
         task.status = "parsing"
         task.started_at = datetime.datetime.now(datetime.timezone.utc)
-        file_path = task.file_path
-        filename = task.filename
+        # Gather all file paths for multi-file parsing
+        files_to_parse = [tf.file_path for tf in sorted(task.files, key=lambda tf: tf.sort_order)]
         db.commit()
 
     data_dir = os.path.join(settings.DATA_DIR, "intermediate", task_id)
@@ -52,9 +52,9 @@ def run_pipeline(self, task_id: str):
         # Layer 1: Parse (0-10%)
         self.update_state(
             state="PROGRESS",
-            meta={"step": "parsing", "detail": "解析文档中...", "progress": 5},
+            meta={"step": "parsing", "detail": f"解析 {len(files_to_parse)} 份文件...", "progress": 5},
         )
-        paragraphs = parse_document(file_path)
+        paragraphs = parse_documents(files_to_parse)
         parsed_path = os.path.join(data_dir, "parsed.json")
         save_parsed(paragraphs, parsed_path)
 
