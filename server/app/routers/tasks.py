@@ -16,6 +16,9 @@ from server.app.models.user import User
 from server.app.schemas.task import TaskListResponse, TaskResponse
 from server.app.services.task_service import (
     create_task_from_upload,
+    add_file_to_pending_task,
+    start_pending_task,
+    get_pending_files,
     delete_task,
     get_task,
     get_tasks,
@@ -43,17 +46,55 @@ async def upload_and_create_task(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """上传第一个文件，创建 pending 状态的 Task（不启动管线）。"""
     task = await create_task_from_upload(db, file, user.id)
+    return task
 
-    # Lazy import avoids Redis connection errors when the module is loaded in
-    # test environments that have no broker available.
+
+@router.post("/{task_id}/files", status_code=status.HTTP_201_CREATED)
+async def add_file(
+    task_id: str,
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """追加文件到 pending 状态的 Task（最多4份）。"""
+    task_file = await add_file_to_pending_task(db, task_id, file, user.id)
+    return {
+        "id": str(task_file.id),
+        "filename": task_file.filename,
+        "file_size": task_file.file_size,
+        "is_primary": task_file.is_primary,
+    }
+
+
+@router.get("/{task_id}/files")
+async def get_files(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """获取 Task 下所有已上传文件列表。"""
+    files = await get_pending_files(db, task_id, user.id)
+    return {"files": files}
+
+
+@router.post("/{task_id}/confirm")
+async def confirm_task(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """用户确认后启动分析管线。"""
+    task = await start_pending_task(db, task_id, user.id)
+
     from server.app.tasks.pipeline_task import run_pipeline  # noqa: PLC0415
 
     celery_result = run_pipeline.delay(str(task.id))
     task.celery_task_id = celery_result.id
+    task.status = "parsing"
     await db.commit()
-    await db.refresh(task)
-    return task
+    return {"task_id": str(task.id), "status": "parsing"}
 
 
 @router.get("/{task_id}/progress")
