@@ -84,7 +84,16 @@ async def preview_file(
         file_path = gf.file_path
         fname = os.path.basename(gf.file_path)
 
-    html_content = _docx_to_html(file_path)
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".docx":
+        html_content = _docx_to_html(file_path)
+    elif ext == ".doc":
+        html_content = _doc_to_html(file_path)
+    elif ext == ".pdf":
+        html_content = _pdf_to_html(file_path)
+    else:
+        raise HTTPException(status_code=400, detail=f"不支持预览的文件类型: {ext}")
+
     return {"html": html_content, "filename": fname}
 
 
@@ -287,6 +296,62 @@ def _docx_to_html(file_path: str) -> str:
             if table_idx < len(doc.tables):
                 parts.append(_table_to_html(doc.tables[table_idx]))
                 table_idx += 1
+
+    return "\n".join(parts)
+
+
+def _doc_to_html(file_path: str) -> str:
+    """Convert a .doc file to HTML via LibreOffice temp conversion."""
+    import tempfile
+    from src.parser.doc_parser import _convert_doc_to_docx
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        docx_path = _convert_doc_to_docx(file_path, tmp_dir)
+        return _docx_to_html(docx_path)
+
+
+def _pdf_to_html(file_path: str) -> str:
+    """Convert a PDF file to simple HTML with text and tables."""
+    try:
+        import pdfplumber
+    except ImportError:
+        return "<p>pdfplumber 未安装，无法预览 PDF</p>"
+
+    parts = []
+    with pdfplumber.open(file_path) as pdf:
+        for page_num, page in enumerate(pdf.pages, 1):
+            parts.append(
+                f'<h2 style="color:#6b7280;font-size:12px;margin-top:20px;border-bottom:1px solid #e5e7eb;padding-bottom:4px">'
+                f"第 {page_num} 页</h2>"
+            )
+
+            # Tables
+            tables = page.extract_tables() or []
+            for table in tables:
+                if not table:
+                    continue
+                rows_html = []
+                for i, row in enumerate(table):
+                    cells = [
+                        f'<td style="padding:4px 8px;border:1px solid #d1d5db">{_html.escape(cell or "")}</td>'
+                        for cell in row
+                    ]
+                    rows_html.append(f"<tr>{''.join(cells)}</tr>")
+                parts.append(
+                    '<table style="border-collapse:collapse;width:100%;margin:8px 0;font-size:14px">'
+                    + "".join(rows_html)
+                    + "</table>"
+                )
+
+            # Text
+            text = page.extract_text() or ""
+            if text.strip():
+                for line in text.split("\n"):
+                    line = line.strip()
+                    if line:
+                        parts.append(
+                            f'<p style="margin:2px 0;font-size:14px">{_html.escape(line)}</p>'
+                        )
 
     return "\n".join(parts)
 
