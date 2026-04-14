@@ -20,6 +20,7 @@ from server.app.services.task_service import (
     add_file_to_pending_task,
     start_pending_task,
     get_pending_files,
+    remove_file_from_task,
     delete_task,
     get_task,
     get_tasks,
@@ -80,6 +81,18 @@ async def get_files(
     """获取 Task 下所有已上传文件列表。"""
     files = await get_pending_files(db, task_id, user.id)
     return {"files": files}
+
+
+@router.delete("/{task_id}/files/{file_id}")
+async def remove_file(
+    task_id: str,
+    file_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """从 pending Task 中删除一个文件。"""
+    result = await remove_file_from_task(db, task_id, file_id, user.id)
+    return result
 
 
 @router.post("/{task_id}/confirm")

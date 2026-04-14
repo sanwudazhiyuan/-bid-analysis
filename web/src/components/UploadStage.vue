@@ -84,13 +84,53 @@ async function uploadFiles(files: File[]) {
   uploading.value = false
 }
 
-function removeFile(index: number) {
-  if (index === 0) {
-    error.value = '不能删除主文件'
+async function removeFile(index: number) {
+  error.value = null
+  const file = fileList.value[index]
+
+  // If it's the last file, delete the whole task
+  if (fileList.value.length === 1) {
+    uploading.value = true
+    try {
+      await tasksApi.delete(taskId.value!)
+    } finally {
+      uploading.value = false
+    }
+    store.resetToUpload()
+    fileList.value = []
+    taskId.value = null
+    localStorage.removeItem('current_task_id')
     return
   }
-  fileList.value.splice(index, 1)
-  fileList.value.forEach((f, i) => { f.sort_order = i })
+
+  // Call backend to delete the file
+  uploading.value = true
+  try {
+    const res = await tasksApi.deleteFile(taskId.value!, file.id)
+
+    // If backend deleted the task (shouldn't happen since length > 1, but handle it)
+    if (res.data.task_deleted) {
+      store.resetToUpload()
+      fileList.value = []
+      taskId.value = null
+      localStorage.removeItem('current_task_id')
+      return
+    }
+
+    // Remove from frontend list
+    fileList.value.splice(index, 1)
+    fileList.value.forEach((f, i) => { f.sort_order = i })
+
+    // If a new primary was promoted, update the primary flag
+    if (file.is_primary && res.data.new_primary) {
+      const newPrimary = fileList.value.find(f => f.filename === res.data.new_primary)
+      if (newPrimary) newPrimary.is_primary = true
+    }
+  } catch (e: any) {
+    error.value = e.response?.data?.detail || '删除失败'
+  } finally {
+    uploading.value = false
+  }
 }
 
 async function startParsing() {
@@ -159,7 +199,6 @@ async function startParsing() {
               <span v-if="f.is_primary" class="text-xs px-1.5 py-0.5 rounded bg-info-light text-info-foreground shrink-0">主文件</span>
             </div>
             <button
-              v-if="i > 0"
               @click="removeFile(i)"
               class="text-text-muted hover:text-danger shrink-0 ml-2"
               :disabled="uploading"

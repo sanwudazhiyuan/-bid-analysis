@@ -148,6 +148,66 @@ async def get_pending_files(db: AsyncSession, task_id: str, user_id: int) -> lis
     ]
 
 
+async def remove_file_from_task(db: AsyncSession, task_id: str, file_id: str, user_id: int) -> dict:
+    """从 pending Task 中删除一个文件。
+
+    - 如果删除的是主文件且有其他文件 → 第2份晋升为主文件，更新 Task.file_path
+    - 如果只剩这1份 → 删除整个 Task，返回 {"task_deleted": True}
+    - 否则只删除 TaskFile 记录
+    """
+    task = await _get_user_task(db, task_id, user_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status != "pending":
+        raise HTTPException(status_code=400, detail="Task is not in pending status")
+
+    file_uuid = uuid.UUID(file_id)
+    result = await db.execute(select(TaskFile).where(TaskFile.id == file_uuid, TaskFile.task_id == task.id))
+    tf = result.scalar_one_or_none()
+    if not tf:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    is_primary = tf.is_primary
+
+    # Delete file from disk
+    if tf.file_path and os.path.exists(tf.file_path):
+        os.remove(tf.file_path)
+    await db.delete(tf)
+    await db.flush()
+
+    if is_primary:
+        # Promote the next file (sort_order=1 → becomes new primary)
+        result = await db.execute(
+            select(TaskFile)
+            .where(TaskFile.task_id == task.id)
+            .order_by(TaskFile.sort_order)
+        )
+        remaining = result.scalars().all()
+        if not remaining:
+            # No files left — delete the whole task
+            for dir_prefix in ["uploads", "intermediate", "output"]:
+                dir_path = os.path.join(settings.DATA_DIR, dir_prefix, str(task.id))
+                if os.path.exists(dir_path):
+                    shutil.rmtree(dir_path)
+            await db.delete(task)
+            await db.commit()
+            return {"task_deleted": True}
+        else:
+            # Re-number sort_order and promote first remaining to primary
+            for i, f in enumerate(remaining):
+                f.sort_order = i
+                f.is_primary = (i == 0)
+                if i == 0:
+                    task.filename = f.filename
+                    task.file_path = f.file_path
+                    task.file_size = f.file_size
+            await db.commit()
+            return {"task_deleted": False, "new_primary": remaining[0].filename}
+    else:
+        await db.commit()
+        return {"task_deleted": False}
+
+
 def _sanitize_filename(raw_name: str | None) -> str:
     """Decode latin-1 encoded Chinese filenames safely."""
     filename = raw_name or ""

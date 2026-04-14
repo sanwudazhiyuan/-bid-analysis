@@ -16,6 +16,8 @@ export const tasksApi = {
     client.get<{ files: TaskFile[] }>(`/tasks/${taskId}/files`),
   confirm: (id: string) =>
     client.post<{ task_id: string; status: string }>(`/tasks/${id}/confirm`),
+  deleteFile: (taskId: string, fileId: string) =>
+    client.delete<{ task_deleted: boolean; new_primary?: string }>(`/tasks/${taskId}/files/${fileId}`),
   list: (params?: { page?: number; page_size?: number; status?: string }) =>
     client.get('/tasks', { params }),
   get: (id: string) => client.get<Task>(`/tasks/${id}`),
