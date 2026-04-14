@@ -1,3 +1,11 @@
+export interface TaskFile {
+  id: string
+  filename: string
+  file_size: number | null
+  is_primary: boolean
+  sort_order: number
+}
+
 export interface Task {
   id: string
   filename: string
@@ -10,6 +18,7 @@ export interface Task {
   created_at: string
   started_at: string | null
   completed_at: string | null
+  files?: TaskFile[]
 }
 
 export interface ProgressEvent {
