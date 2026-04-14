@@ -3,7 +3,6 @@ import { ref, computed } from 'vue'
 import { FileText, Plus, X, Play } from 'lucide-vue-next'
 import { useAnalysisStore } from '../stores/analysisStore'
 import { tasksApi } from '../api/tasks'
-import type { TaskFile } from '../types/task'
 
 const store = useAnalysisStore()
 
