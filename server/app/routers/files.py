@@ -130,7 +130,16 @@ async def delete_file(
             if rt.annotated_file_path and os.path.exists(rt.annotated_file_path):
                 os.remove(rt.annotated_file_path)
             await db.delete(rt)
-        # Delete uploaded file
+        # Delete all uploaded files (including TaskFile paths)
+        from server.app.models.task_file import TaskFile
+        tf_result = await db.execute(
+            select(TaskFile).where(TaskFile.task_id == task.id)
+        )
+        for tf in tf_result.scalars().all():
+            if tf.file_path and os.path.exists(tf.file_path):
+                os.remove(tf.file_path)
+            await db.delete(tf)
+        # Also delete primary file_path from Task (in case it's not in TaskFile)
         if task.file_path and os.path.exists(task.file_path):
             os.remove(task.file_path)
         # Delete intermediate and output directories

@@ -31,6 +31,8 @@ async def list_files(
 
 
 async def _list_bid_documents(db, user_id, page, page_size, q):
+    from server.app.models.task_file import TaskFile
+
     base = select(Task).where(Task.user_id == user_id)
     count_base = select(func.count()).select_from(Task).where(
         Task.user_id == user_id,
@@ -44,11 +46,23 @@ async def _list_bid_documents(db, user_id, page, page_size, q):
         base.order_by(Task.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
     )
     tasks = result.scalars().all()
+
+    # Batch fetch file counts for all tasks
+    task_ids = [t.id for t in tasks]
+    file_counts = {}
+    if task_ids:
+        fc_result = await db.execute(
+            select(TaskFile.task_id, func.count()).where(TaskFile.task_id.in_(task_ids)).group_by(TaskFile.task_id)
+        )
+        for tid, cnt in fc_result.all():
+            file_counts[tid] = cnt
+
     items = [
         {
             "id": str(t.id), "filename": t.filename, "file_size": t.file_size,
             "created_at": t.created_at.isoformat() if t.created_at else None,
             "task_name": t.filename, "status": t.status,
+            "file_count": file_counts.get(t.id, 1),
         }
         for t in tasks
     ]
