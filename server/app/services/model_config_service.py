@@ -165,9 +165,17 @@ class ModelConfigService:
 
     @staticmethod
     def build_yaml_dict(config: SystemConfig) -> dict:
-        """Convert SystemConfig DB record to settings.yaml format."""
+        """Convert SystemConfig DB record to settings.yaml format.
+        Cloud mode api_key is restored to ${DASHSCOPE_API_KEY} placeholder
+        to prevent leaking the real key into the yaml file."""
         if config.mode == "cloud":
-            return config.cloud_config if config.cloud_config else {}
+            cloud = config.cloud_config if config.cloud_config else {}
+            # Replace resolved api_key with env var placeholder
+            result = dict(cloud)
+            if "api" in result:
+                result["api"] = dict(result["api"])
+                result["api"]["api_key"] = "${DASHSCOPE_API_KEY}"
+            return result
         # Local mode
         llm = config.local_llm_config or {}
         emb = config.local_embedding_config or {}
@@ -245,8 +253,9 @@ class ModelConfigService:
         """Ensure system_config has a record. If not, seed from current settings.yaml."""
         existing = await ModelConfigService.get_current_config_async(db)
         if existing:
-            # Sync DB config to yaml (ensure consistency)
-            ModelConfigService.sync_to_yaml(existing)
+            # Do NOT sync DB config back to yaml on startup — the yaml api_key
+            # uses ${DASHSCOPE_API_KEY} placeholder while DB stores the resolved
+            # value.  Writing it back would leak the real key into yaml.
             return
 
         # No record exists — seed from current settings.yaml + haha-code .env
