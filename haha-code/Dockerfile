@@ -12,8 +12,9 @@ RUN bun install --registry=https://registry.npmmirror.com
 # Copy source
 COPY . .
 
-# Copy .env from example
-RUN cp .env.example .env
+# .env is NOT created at build time — docker-compose env vars are the primary
+# source. The /config endpoint's writeConfigToEnv() will create .env at runtime
+# when admin saves config.
 
 # Set review timeout to 15 minutes
 ENV REVIEW_TIMEOUT_MS=900000

@@ -51,6 +51,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://biduser:${DB_PASSWORD:-devpassword}@postgres:5432/bid_analyzer
       REDIS_URL: redis://redis:6379/0
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      HAHA_CODE_URL: http://haha-code:3000
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-in-production}
     volumes:
       - filedata:/data
@@ -62,6 +63,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+      haha-code: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 30s
@@ -86,8 +88,9 @@ services:
     volumes:
       - filedata:/data
     healthcheck:
-      test: ["CMD", "bun", "-e", "fetch('http://localhost:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
-      interval: 10s
+      test: ["CMD-SHELL", "bun -e 'const r=await fetch(\"http://localhost:3000/health\");if(!r.ok)process.exit(1)' || exit 1"]
+      interval: 15s
+      start_period: 10s
       retries: 5
 
   worker:
