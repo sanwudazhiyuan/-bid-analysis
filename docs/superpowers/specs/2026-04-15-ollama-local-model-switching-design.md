@@ -37,38 +37,53 @@ type: project
 
 ## 1. 数据库模型
 
-新增 `system_config` 表，存储模型配置（只保留一条记录，每次更新覆盖写入）：
+新增 `system_config` 表，存储模型配置（只保留一条记录，每次更新覆盖写入）。
+
+SQLAlchemy 模型定义文件：`server/app/models/system_config.py`（新文件），需在 `server/app/models/__init__.py` 中导入并注册。
 
 ```
-system_config
-├── id (Integer, PK)
-├── mode (String) — "cloud" | "local"，全局开关
-├── cloud_config (JSON) — 云端配置快照
+class SystemConfig(Base):
+    __tablename__ = "system_config"
+    id = Column(Integer, primary_key=True)
+    mode = Column(String(10), nullable=False, default="cloud")  — "cloud" | "local"
+    cloud_config = Column(JSON, nullable=False) — 云端配置快照
+    local_llm_config = Column(JSON, nullable=True) — 本地 LLM 配置
+    local_embedding_config = Column(JSON, nullable=True) — 本地 Embedding 配置
+    local_haha_code_config = Column(JSON, nullable=True) — 本地 haha-code 配置
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    updated_by = Column(Integer, ForeignKey("users.id"))
+```
+
+JSON 字段详细结构：
+
+```
+cloud_config (JSON):
 │   ├── api: { base_url, api_key, model, temperature, max_output_tokens, ... }
 │   ├── embedding: { model, dimensions, batch_size, ... }
 │   └── haha_code: { anthropic_base_url, anthropic_model, ... }
-├── local_llm_config (JSON) — 本地 LLM 配置
-│   ├── server_url (String) — e.g. "http://10.165.25.39:11434"
-│   ├── model_name (String) — e.g. "qwen2.5:14b"
-│   ├── context_length (Integer) — e.g. 32768
-│   ├── context_length_manual (Boolean) — 是否手动设定
+
+local_llm_config (JSON):
+│   ├── server_url — e.g. "http://10.165.25.39:11434"
+│   ├── model_name — e.g. "qwen2.5:14b"
+│   ├── context_length — e.g. 32768
+│   ├── context_length_manual — 是否手动设定
 │   ├── temperature, max_output_tokens, ...
-├── local_embedding_config (JSON) — 本地 Embedding 配置
-│   ├── server_url (String) — e.g. "http://10.165.44.28:11434"
-│   ├── model_name (String) — e.g. "bge-m3"
-│   ├── context_length (Integer)
-│   ├── context_length_manual (Boolean)
-│   ├── dimensions (Integer)
-│   ├── dimensions_manual (Boolean)
-│   ├── batch_size (Integer) — 动态计算或手动设定
-├── local_haha_code_config (JSON) — 本地 haha-code 配置
-│   ├── anthropic_base_url (String) — e.g. "http://10.165.25.39:11434/v1"
-│   ├── anthropic_model (String) — 默认主模型，从 10.165.25.39 下拉选择
-│   ├── anthropic_sonnet_model (String) — Sonnet 模型，从 10.165.25.39 下拉选择
-│   ├── anthropic_haiku_model (String) — Haiku 模型，从 10.165.25.39 下拉选择
-│   ├── anthropic_auth_token (String) — Ollama 兼容端点使用 "ollama"
-├── updated_at (DateTime)
-├── updated_by (Integer, FK → users.id)
+
+local_embedding_config (JSON):
+│   ├── server_url — e.g. "http://10.165.44.28:11434"
+│   ├── model_name — e.g. "bge-m3"
+│   ├── context_length
+│   ├── context_length_manual
+│   ├── dimensions
+│   ├── dimensions_manual
+│   ├── batch_size — 动态计算或手动设定
+
+local_haha_code_config (JSON):
+│   ├── anthropic_base_url — e.g. "http://10.165.25.39:11434/v1"
+│   ├── anthropic_model — 默认主模型，从 10.165.25.39 下拉选择
+│   ├── anthropic_sonnet_model — Sonnet 模型，从 10.165.25.39 下拉选择
+│   ├── anthropic_haiku_model — Haiku 模型，从 10.165.25.39 下拉选择
+│   ├── anthropic_auth_token — Ollama 兼容端点使用 "ollama"
 ```
 
 ### 嵌入维度适配
@@ -77,7 +92,7 @@ system_config
 - 切换嵌入模型时，后端比较新维度与当前已存储的维度：
   - 维度相同 → 无需处理，直接切换
   - 维度不同 → 前端弹确认对话框："切换嵌入模型将导致所有已有索引失效，需要重新解析和索引所有招标文件。是否继续？"
-  - 管理员确认 → 标记所有 `Task` 索引状态为 `needs_reindex`
+  - 管理员确认 → 标记所有 `Task` 索引状态为 `needs_reindex`（懒重建策略：下次审评任务处理时自动重建索引，而非立即批量重建，避免资源峰值）
 - 运行时防护：`embedding.py` 检查当前配置维度与请求维度是否一致，不一致则拒绝并提示重建索引
 
 ---
@@ -138,9 +153,9 @@ class ModelConfigService:
 
 | 文件 | 改造内容 |
 |------|----------|
-| `src/extractor/base.py` | `call_qwen()` 的 settings 参数改为从 `ModelConfigService` 获取 |
-| `src/extractor/embedding.py` | `_call_embedding_api()` 同上，batch_size 从动态配置获取 |
-| `src/reviewer/reviewer.py` | `llm_review_clause()` 分批逻辑的 max_tokens 从动态配置获取 |
+| `src/extractor/base.py` | `call_qwen()` 的 settings 参数改为从 `ModelConfigService` 获取；`batch_paragraphs()` 的 max_tokens 参数改为从配置动态获取（当前硬编码 120000），这是本地模式分批的核心入口 |
+| `src/extractor/embedding.py` | `_call_embedding_api()` 需改为优先从 `settings["embedding"]["base_url"]` 读取（本地模式有独立地址），若无则 fallback 到 `settings["api"]["base_url"]`（云端模式共用同一地址）。当前代码只从 `settings["api"]` 读取 base_url，需修正。batch_size 从动态配置获取 |
+| `src/reviewer/reviewer.py` | `llm_review_clause()` 的 max_tokens 从动态配置获取；现有 intermediate/final 流程已在 `review_task.py` 中由批次循环调用，无需新增分批逻辑，只需确保传入的 max_tokens 正确 |
 | `src/reviewer/smart_reviewer.py` | `call_smart_review()` 连接地址从动态配置获取 |
 | `src/config.py` | 启动时从 DB 加载配置写入 yaml，后续调用者从 Service 获取 |
 | `server/app/tasks/review_task.py` | 任务启动时查询一次 ModelConfigService 获取当前配置，整个任务期间使用该配置 |
@@ -154,7 +169,7 @@ class ModelConfigService:
 
 - 路由：`/admin/config`（在 router/index.ts 的 SidebarLayout children 中新增）
 - 权限：`meta: { requiresAdmin: true }`
-- 导航：在 AppSidebar.vue 中为 admin 用户新增"模型配置"入口（使用 `Settings` 或 `Server` 图标 from lucide-vue-next）
+- 导航：在 AppSidebar.vue 中为 admin 角色用户新增"模型配置"入口（使用 `Settings` 图标 from lucide-vue-next），仅对 admin 角色显示（通过 authStore.user.role 判断）。当前侧边栏没有 admin 区域，需新增 admin 分组（类似 "文档管理" 分组）
 
 ### 页面布局
 
@@ -237,7 +252,7 @@ max_input_tokens = context_length - max_output_tokens - safety_margin
 其中:
 - context_length: 从 ModelConfigService 获取（自动查询或手动设定）
 - max_output_tokens: 配置中的 max_output_tokens（如 65536 云端 / 8192 本地）
-- safety_margin: 固定 500 tokens（预留 prompt 模板开销）
+- safety_margin: 固定 1500 tokens（预留 prompt 模板开销，审评 prompt 模板较长，500 不够安全）
 ```
 
 ### 分批拆分策略
@@ -265,11 +280,11 @@ calculate_embedding_batch_size(context_length, avg_text_length=500):
 
 | 文件 | 改造内容 |
 |------|----------|
-| `src/extractor/base.py` | `batch_paragraphs()` 的 max_tokens 参数改为从配置动态获取 |
-| `src/reviewer/reviewer.py` | `llm_review_clause()` 新增分批逻辑：估算 token → 超限时分批 → intermediate/final 流程 |
+| `src/extractor/base.py` | `batch_paragraphs()` 的 max_tokens 参数改为从配置动态获取（当前硬编码 120000），这是分批的核心入口 |
+| `src/reviewer/reviewer.py` | `llm_review_clause()` 的 max_tokens 从动态配置获取。现有 intermediate/final 分批流程已在 `review_task.py` (lines 363-415) 中由批次循环实现，无需在 reviewer.py 新增分批逻辑，只需确保传入的 max_tokens 正确 |
 | `src/reviewer/bid_context.py` | `build_clause_bid_contexts()` 返回的段落列表需支持按 token 拆分 |
-| `src/extractor/embedding.py` | `batch_size` 从配置动态获取而非 yaml 固定值 |
-| `src/reviewer/tender_indexer.py` | `MAX_CHARS_PER_BATCH` 改为根据 context_length 动态计算 |
+| `src/extractor/embedding.py` | `batch_size` 从配置动态获取而非 yaml 固定值；`_call_embedding_api()` base_url 优先从 embedding 配置读取 |
+| `src/reviewer/tender_indexer.py` | `LEAF_SPLIT_THRESHOLD` 和 `_split_by_char_count()` 的 `MAX_CHARS_PER_BATCH` 改为根据 context_length 动态计算 |
 | `config/prompts/review_clause_intermediate.txt` | 已支持 prev_summary 和 prev_candidates |
 | `config/prompts/review_clause_final.txt` | 已支持 accumulated_summary 和 all_candidates |
 
@@ -287,6 +302,7 @@ calculate_embedding_batch_size(context_length, avg_text_length=500):
    - cloud: 直接使用 cloud_config JSON
    - local: 将 local_*_config 转换为 settings.yaml 格式
 4. 写入 config/settings.yaml（保持与现有格式一致）
+4a. 同时清空 config/settings.local.yaml（避免本地覆盖文件干扰数据库权威配置）
 5. 通知 haha-code 热更新
 6. 清除内存缓存
 ```
@@ -329,8 +345,10 @@ POST /config
 
 haha-code/server.ts 改造:
 - 新增 /config POST 端点
-- 收到配置后更新内存中的环境变量映射
-- 下次 /review 请求时使用新配置
+- 收到配置后：
+  a. 将新配置写入哈哈-code/.env 文件（ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_MODEL 等）
+  b. 更新内存中的环境变量映射（process.env），供当前 server 进程直接使用
+- 注意：Bun.spawn 子进程通过 --env-file=.env 读取 .env 文件（server.ts line 274），因此写入 .env 后，下次 /review 请求创建的子进程会自动读取新配置
 - 配置变更日志记录
 ```
 
@@ -338,10 +356,13 @@ haha-code/server.ts 改造:
 
 ```
 Celery 任务中的配置获取:
-- review_task.py 在任务开始时调用 ModelConfigService.get_current_config()
+- Celery worker 与 FastAPI server 共享同一代码库和数据库连接
+- review_task.py 在任务开始时通过 SQLAlchemy 直接查询 system_config 表获取当前配置（无需通过 API 调用）
+- 同时调用 `load_settings()` 读取已同步的 settings.yaml 文件作为 fallback
 - 整个任务执行期间使用这次获取的配置（不会中途切换）
 - 配置通过 task 参数传入，不依赖全局变量
 - 正在运行的任务自然使用旧配置完成
+- 已排队但未启动的任务使用新配置（因为任务开始时才读取配置）
 ```
 
 ### 启动初始化
