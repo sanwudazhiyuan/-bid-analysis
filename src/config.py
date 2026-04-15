@@ -1,4 +1,5 @@
 import os
+import logging
 import yaml
 from pathlib import Path
 
@@ -35,6 +36,37 @@ def load_settings() -> dict:
         env_var = api_key[2:-1]
         settings["api"]["api_key"] = os.environ.get(env_var, "")
     return settings
+
+
+def load_settings_from_dict(config_dict: dict) -> dict:
+    """Load settings from a pre-built dict (e.g., from DB), skipping yaml file read.
+    Used by Celery worker which reads config from DB, not yaml."""
+    api_key = config_dict.get("api", {}).get("api_key", "")
+    if isinstance(api_key, str) and api_key.startswith("${") and api_key.endswith("}"):
+        env_var = api_key[2:-1]
+        config_dict["api"]["api_key"] = os.environ.get(env_var, "")
+    return config_dict
+
+
+def load_settings_from_db() -> dict | None:
+    """Load current config from system_config DB table using sync SQLAlchemy.
+    Returns None if no config record exists (fallback to yaml)."""
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+    from server.app.models.system_config import SystemConfig
+    from server.app.config import settings as server_settings
+
+    try:
+        sync_url = server_settings.DATABASE_URL.replace("+asyncpg", "")
+        engine = create_engine(sync_url)
+        with Session(engine) as db:
+            config = db.execute(select(SystemConfig).limit(1)).scalar_one_or_none()
+            if config:
+                from server.app.services.model_config_service import ModelConfigService
+                return load_settings_from_dict(ModelConfigService.build_yaml_dict(config))
+    except Exception as e:
+        logging.getLogger(__name__).warning("Failed to load config from DB: %s, falling back to yaml", e)
+    return None
 
 
 def load_synonyms() -> dict:

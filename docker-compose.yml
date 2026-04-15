@@ -1,3 +1,15 @@
+# ============================================================
+# 标书智能解析系统 - Docker Compose 配置
+# ============================================================
+# 国内镜像源配置说明:
+#   Docker 镜像源: 配置 Docker daemon.json 的 registry-mirrors
+#     推荐源: https://docker.1ms.run, https://docker.xuanyuan.me
+#   Python pip: mirrors.aliyun.com/pypi (已在 server/Dockerfile 中配置)
+#   Node npm:   npmmirror.com (已在 web/Dockerfile 中配置)
+#   Bun:        npmmirror.com (已在 haha-code/Dockerfile 中配置)
+#   Debian apt: mirrors.tuna.tsinghua.edu.cn (已在 server/Dockerfile 中配置)
+# ============================================================
+
 name: bid-analyzer
 
 services:
@@ -74,7 +86,7 @@ services:
     volumes:
       - filedata:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      test: ["CMD", "bun", "-e", "fetch('http://localhost:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
       retries: 5
 

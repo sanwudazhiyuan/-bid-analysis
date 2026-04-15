@@ -3,7 +3,7 @@ import logging
 import time
 import uuid as _uuid
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from server.app.config import settings
@@ -34,9 +34,9 @@ def run_review(self, review_id: str):
         llm_review_clause_final, assemble_multi_batch_result, compute_summary,
     )
     from src.reviewer.docx_annotator import generate_review_docx
-    from src.config import load_settings
+    from src.config import load_settings, load_settings_from_db
 
-    api_settings = load_settings()
+    api_settings = load_settings_from_db() or load_settings()
 
     with Session(_sync_engine) as db:
         review = db.get(ReviewTask, _uuid.UUID(review_id))
@@ -101,8 +101,11 @@ def run_review(self, review_id: str):
 
             image_by_para = {}
             for img in extracted_images:
-                pi = img.get("near_para_index")
-                if pi is not None:
+                indices = img.get("near_para_indices")
+                if not indices:
+                    pi = img.get("near_para_index")
+                    indices = [pi] if pi is not None else []
+                for pi in indices:
                     image_by_para.setdefault(pi, []).append(img["filename"])
 
             from dataclasses import replace as dc_replace
@@ -144,19 +147,39 @@ def run_review(self, review_id: str):
             clause_progress_start = 15
             clause_progress_end = 95
 
+            # 预提取每个条款对应的招标原文上下文
+            # - 智能审核：作为 tender_context 传给 agent 辅助理解条款
+            # - 固定审核：作为 bid_reference 追加进 LLM 审查 prompt
+            # 两种模式共用 build_clause_bid_contexts helper。
+            from src.reviewer.bid_context import build_clause_bid_contexts
+            self.update_state(state="PROGRESS", meta={"step": "mapping", "progress": 11, "detail": "条款映射（招标原文）"})
+            review.progress = 11
+            review.current_step = "条款映射（招标原文）"
+            db.commit()
+
+            bid_indexed_data = _load_bid_indexed_data(bid_task)
+            mapping_settings = {**api_settings}
+            mapping_settings["api"] = {**mapping_settings.get("api", {}), "model": "qwen3.5-flash"}
+            clause_bid_contexts = build_clause_bid_contexts(
+                all_clauses, bid_indexed_data, bid_tagged_paragraphs, mapping_settings,
+            )
+            logger.info(
+                "条款→招标原文映射: %d/%d 条款获得上下文",
+                sum(1 for v in clause_bid_contexts.values() if v), len(all_clauses),
+            )
+
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
             if review_mode == "smart":
-                # ── 智能审核模式：图片预描述 → 条款映射 → 构建文件夹 → haha-code 逐条审查 ──
+                # ── 智能审核模式：图片预描述 → 构建文件夹 → haha-code 逐条审查 ──
+                # 条款→招标原文映射已在上面统一完成（clause_bid_contexts）。
                 from src.reviewer.folder_builder import build_tender_folder
                 from src.reviewer.image_describer import describe_images
                 from src.reviewer.smart_reviewer import call_smart_review
-                from src.reviewer.clause_mapper import llm_map_clauses_to_leaf_nodes
-                from src.reviewer.bid_context import build_bid_chapter_index, extract_bid_context_for_clauses
 
-                # Step 4s-1: 图片预描述 (5-8%)
-                self.update_state(state="PROGRESS", meta={"step": "describing", "progress": 5, "detail": "图片预描述"})
-                review.progress = 5
+                # Step 4s-1: 图片预描述
+                self.update_state(state="PROGRESS", meta={"step": "describing", "progress": 12, "detail": "图片预描述"})
+                review.progress = 12
                 review.current_step = "图片预描述"
                 db.commit()
 
@@ -165,12 +188,17 @@ def run_review(self, review_id: str):
                 image_descriptions = describe_images(api_key, extracted_images) if extracted_images else {}
 
                 # 按段落分组图片描述和图片文件名
+                # 同一张物理图片可能被多个段落引用（如证书同时出现在资格证明和技术部分），
+                # 需要将描述/文件名挂到所有引用段落，否则部分章节 MD 会缺失图片。
                 image_para_map: dict[int, list[str]] = {}
                 image_para_files: dict[int, list[str]] = {}
                 for img in extracted_images:
-                    pi = img.get("near_para_index")
-                    if pi is not None:
-                        desc = image_descriptions.get(img["filename"], "")
+                    indices = img.get("near_para_indices")
+                    if not indices:
+                        pi = img.get("near_para_index")
+                        indices = [pi] if pi is not None else []
+                    desc = image_descriptions.get(img["filename"], "")
+                    for pi in indices:
                         if desc:
                             image_para_map.setdefault(pi, []).append(desc)
                         image_para_files.setdefault(pi, []).append(img["filename"])
@@ -183,32 +211,9 @@ def run_review(self, review_id: str):
                     {pi: len(fns) for pi, fns in image_para_files.items()},
                 )
 
-                # Step 4s-2: 条款→招标文件章节映射 (8-11%)
-                # 智能审核：映射到招标文件章节，提取招标原文作为条款上下文
-                # （agent 会自行浏览投标文件夹，不需要预提取投标文件内容）
-                self.update_state(state="PROGRESS", meta={"step": "mapping", "progress": 8, "detail": "条款映射（招标原文）"})
-                review.progress = 8
-                review.current_step = "条款映射（招标原文）"
-                db.commit()
-
-                # 从招标解读的 indexed.json 构建招标文件章节索引
-                bid_indexed_data = _load_bid_indexed_data(bid_task)
-                bid_chapter_index = build_bid_chapter_index(bid_indexed_data)
-
-                clause_contexts: dict[int, str] = {}
-                if bid_chapter_index["chapters"]:
-                    mapping_settings = {**load_settings()}
-                    mapping_settings["api"] = {**mapping_settings["api"], "model": "qwen3.5-flash"}
-                    clause_mapping = llm_map_clauses_to_leaf_nodes(clauses, bid_chapter_index, mapping_settings)
-                    clause_contexts = extract_bid_context_for_clauses(
-                        clause_mapping, bid_chapter_index, bid_tagged_paragraphs,
-                    )
-                else:
-                    logger.warning("招标文件章节索引为空，跳过条款映射")
-
-                # Step 4s-3: 构建文件夹结构 (11-14%)
-                self.update_state(state="PROGRESS", meta={"step": "building", "progress": 11, "detail": "构建文件夹"})
-                review.progress = 11
+                # Step 4s-3: 构建文件夹结构
+                self.update_state(state="PROGRESS", meta={"step": "building", "progress": 13, "detail": "构建文件夹"})
+                review.progress = 13
                 review.current_step = "构建文件夹结构"
                 db.commit()
 
@@ -221,13 +226,22 @@ def run_review(self, review_id: str):
                 logger.info("Tender folder built at %s", folder_dir)
 
                 # Step 5s-7s: 并发智能审查 (15-95%)
+                # 首条条款完成前进度不会前进，先显式推一次 reviewing 状态，避免 UI 卡在"构建文件夹"
+                self.update_state(state="PROGRESS", meta={
+                    "step": "reviewing", "progress": clause_progress_start,
+                    "detail": f"智能审查 [0/{len(all_clauses)}]",
+                })
+                review.progress = clause_progress_start
+                review.current_step = f"智能审查 [0/{len(all_clauses)}]"
+                db.commit()
+
                 SMART_MAX_WORKERS = 4
                 results_by_index: dict[int, dict] = {}
                 futures = {}
 
                 with ThreadPoolExecutor(max_workers=SMART_MAX_WORKERS) as executor:
                     for clause in all_clauses:
-                        tender_context = clause_contexts.get(clause["clause_index"], "")
+                        tender_context = clause_bid_contexts.get(clause["clause_index"], "")
                         future = executor.submit(call_smart_review, clause, folder_dir, project_context, tender_context)
                         futures[future] = clause
 
@@ -245,19 +259,11 @@ def run_review(self, review_id: str):
                         })
                         review.progress = progress
                         review.current_step = f"智能审查 [{completed}/{len(all_clauses)}]"
-                        if completed % 5 == 0 or completed == len(all_clauses):
-                            try:
-                                with _sync_engine.connect() as conn:
-                                    conn.execute(
-                                        text(
-                                            "UPDATE review_tasks SET progress = :progress, "
-                                            "current_step = :step WHERE id = :id"
-                                        ),
-                                        {"progress": progress, "step": review.current_step, "id": review.id},
-                                    )
-                                    conn.commit()
-                            except Exception:
-                                pass
+                        try:
+                            db.commit()
+                        except Exception as e:
+                            logger.warning("Progress commit failed (smart): %s", e)
+                            db.rollback()
 
                         try:
                             result = future.result()
@@ -328,11 +334,16 @@ def run_review(self, review_id: str):
                     if not batches:
                         return _no_match_item(clause)
 
+                    bid_reference = clause_bid_contexts.get(clause["clause_index"], "")
+
                     if len(batches) == 1:
                         batch = batches[0]
                         tender_text = paragraphs_to_text(batch.paragraphs)
                         try:
-                            result = llm_review_clause(clause, tender_text, project_context, api_settings, image_map=image_map)
+                            result = llm_review_clause(
+                                clause, tender_text, project_context, api_settings,
+                                image_map=image_map, bid_reference=bid_reference,
+                            )
                             return map_batch_indices_to_global(result, batch)
                         except Exception as e:
                             logger.error("Clause review failed for %d: %s", clause["clause_index"], e)
@@ -359,6 +370,7 @@ def run_review(self, review_id: str):
                                         clause, tender_text, project_context,
                                         accumulated_summary, all_candidates,
                                         api_settings, image_map=image_map,
+                                        bid_reference=bid_reference,
                                     )
                                     # 校验末批次 locations 的索引
                                     batch_indices = {p.index for p in batch.paragraphs}
@@ -387,6 +399,7 @@ def run_review(self, review_id: str):
                                         prev_candidates=all_candidates if all_candidates else None,
                                         api_settings=api_settings,
                                         image_map=image_map,
+                                        bid_reference=bid_reference,
                                     )
                                     # 校验候选索引是否在当前批次范围内
                                     batch_indices = {p.index for p in batch.paragraphs}
@@ -404,6 +417,15 @@ def run_review(self, review_id: str):
                 MAX_WORKERS = 8
                 results_by_index: dict[int, dict] = {}
                 futures = {}
+
+                # 首条条款完成前先显式推一次 reviewing 状态
+                self.update_state(state="PROGRESS", meta={
+                    "step": "reviewing", "progress": clause_progress_start,
+                    "detail": f"审查 [0/{len(all_clauses)}]",
+                })
+                review.progress = clause_progress_start
+                review.current_step = f"审查 [0/{len(all_clauses)}]"
+                db.commit()
 
                 with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                     for clause in all_clauses:
@@ -424,19 +446,11 @@ def run_review(self, review_id: str):
                         })
                         review.progress = progress
                         review.current_step = f"审查 [{completed}/{len(all_clauses)}]"
-                        if completed % 5 == 0 or completed == len(all_clauses):
-                            try:
-                                with _sync_engine.connect() as conn:
-                                    conn.execute(
-                                        text(
-                                            "UPDATE review_tasks SET progress = :progress, "
-                                            "current_step = :step WHERE id = :id"
-                                        ),
-                                        {"progress": progress, "step": review.current_step, "id": review.id},
-                                    )
-                                    conn.commit()
-                            except Exception:
-                                pass
+                        try:
+                            db.commit()
+                        except Exception as e:
+                            logger.warning("Progress commit failed: %s", e)
+                            db.rollback()
 
                         try:
                             result = future.result()
@@ -475,11 +489,29 @@ def run_review(self, review_id: str):
 
             # Store images metadata in summary for preview API
             summary["extracted_images"] = [
-                {"filename": img["filename"], "near_para_index": img.get("near_para_index"),
+                {"filename": img["filename"],
+                 "near_para_index": img.get("near_para_index"),
+                 "near_para_indices": img.get("near_para_indices") or [],
                  "content_type": img.get("content_type", "")}
                 for img in extracted_images
             ]
             summary["pii_masked_count"] = len(pii_mapping)
+
+            # Pre-render preview HTML once to avoid per-request python-docx cost
+            try:
+                from server.app.services.review_preview import build_preview_html
+                tender_html = build_preview_html(
+                    review.tender_file_path,
+                    review_items,
+                    summary["extracted_images"],
+                    review_id,
+                )
+                preview_path = os.path.join(output_dir, "preview.html")
+                with open(preview_path, "w", encoding="utf-8") as f:
+                    f.write(tender_html)
+                summary["preview_html_path"] = preview_path
+            except Exception as e:
+                logger.warning("Pre-render preview HTML failed: %s", e, exc_info=True)
 
             review.review_summary = summary
             review.review_items = review_items

@@ -232,11 +232,22 @@ def call_qwen(messages: list[dict], settings: dict | None = None) -> dict | list
 # ========== 分批处理 ==========
 
 def batch_paragraphs(
-    paragraphs: list[TaggedParagraph], max_tokens: int = 120000
+    paragraphs: list[TaggedParagraph], max_tokens: int | None = None, settings: dict | None = None
 ) -> list[list[TaggedParagraph]]:
     """将段落按 token 上限分批，尽量在章节边界断开。"""
     if not paragraphs:
         return []
+
+    if max_tokens is None:
+        if settings and "api" in settings:
+            context_length = settings["api"].get("context_length")
+            max_output_tokens = settings["api"].get("max_output_tokens", 65536)
+            if context_length:
+                max_tokens = context_length - max_output_tokens - 1500  # safety_margin
+            else:
+                max_tokens = 120000  # cloud default
+        else:
+            max_tokens = 120000
 
     batches = []
     current_batch = []

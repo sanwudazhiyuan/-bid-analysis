@@ -1,16 +1,13 @@
 FROM oven/bun:1
 
-# Install curl for healthcheck and git (required by haha-code)
-RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
-    sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true && \
-    apt-get update && apt-get install -y --no-install-recommends curl git && \
-    rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 
+# Use Chinese mirror for bun/npm
+ENV BUN_INSTALL_NPM_REGISTRY=https://registry.npmmirror.com
+
 # Install dependencies
-COPY package.json bunfig.toml ./
-RUN bun install
+COPY package.json bun.lock* bunfig.toml ./
+RUN bun install --registry=https://registry.npmmirror.com
 
 # Copy source
 COPY . .

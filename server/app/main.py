@@ -2,16 +2,34 @@
 
 import time
 from collections import defaultdict
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from server.app.routers import auth, tasks, download, preview, annotations, users, files, reviews
+from server.app.database import engine, Base, async_session_factory
+from server.app.routers import auth, tasks, download, preview, annotations, users, files, reviews, config as config_router
 import server.app.models.review_task  # noqa: F401 — ensure table is created
 
-app = FastAPI(title="招标文件分析系统", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup: create DB tables if missing, init config, then yield to app."""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    # Initialize system_config from settings.yaml if not exists
+    async with async_session_factory() as db:
+        from server.app.services.model_config_service import ModelConfigService
+        await ModelConfigService.initialize_on_startup(db)
+        await db.commit()
+
+    yield
+
+
+app = FastAPI(title="招标文件分析系统", version="1.0.0", lifespan=lifespan)
 
 # Simple in-memory rate limiting
 _rate_limits: dict[str, list[float]] = defaultdict(list)
@@ -47,6 +65,7 @@ app.include_router(annotations.router)
 app.include_router(users.router)
 app.include_router(files.router)
 app.include_router(reviews.router)
+app.include_router(config_router.router)
 
 
 @app.get("/api/health")

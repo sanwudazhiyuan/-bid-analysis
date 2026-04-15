@@ -7,5 +7,6 @@ from server.app.models.task_file import TaskFile
 from server.app.models.annotation import Annotation
 from server.app.models.generated_file import GeneratedFile
 from server.app.models.review_task import ReviewTask
+from server.app.models.system_config import SystemConfig
 
-__all__ = ["Base", "User", "Task", "TaskFile", "Annotation", "GeneratedFile", "ReviewTask"]
+__all__ = ["Base", "User", "Task", "TaskFile", "Annotation", "GeneratedFile", "ReviewTask", "SystemConfig"]

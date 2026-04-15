@@ -2,9 +2,20 @@ FROM python:3.11-slim AS base
 
 WORKDIR /app
 
-# Use Chinese mirror for apt
-RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
-    sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true
+# Use Tsinghua mirror for apt (Debian Trixie)
+RUN mkdir -p /etc/apt/sources.list.d && \
+    rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list && \
+    echo "Types: deb" > /etc/apt/sources.list.d/debian.sources && \
+    echo "URIs: https://mirrors.tuna.tsinghua.edu.cn/debian/" >> /etc/apt/sources.list.d/debian.sources && \
+    echo "Suites: trixie trixie-updates" >> /etc/apt/sources.list.d/debian.sources && \
+    echo "Components: main contrib" >> /etc/apt/sources.list.d/debian.sources && \
+    echo "Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg" >> /etc/apt/sources.list.d/debian.sources && \
+    echo "" >> /etc/apt/sources.list.d/debian.sources && \
+    echo "Types: deb" >> /etc/apt/sources.list.d/debian.sources && \
+    echo "URIs: https://mirrors.tuna.tsinghua.edu.cn/debian-security/" >> /etc/apt/sources.list.d/debian.sources && \
+    echo "Suites: trixie-security" >> /etc/apt/sources.list.d/debian.sources && \
+    echo "Components: main contrib" >> /etc/apt/sources.list.d/debian.sources && \
+    echo "Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg" >> /etc/apt/sources.list.d/debian.sources
 
 # Install system dependencies (antiword for .doc parsing, LibreOffice for .doc conversion)
 RUN apt-get update && apt-get install -y --no-install-recommends \

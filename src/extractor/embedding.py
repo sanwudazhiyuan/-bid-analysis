@@ -43,9 +43,11 @@ def _call_embedding_api(
     """调用 DashScope embedding API，返回向量列表。"""
     api_cfg = settings["api"]
     emb_cfg = settings.get("embedding", {})
+    emb_base_url = emb_cfg.get("base_url") or api_cfg["base_url"]
+    emb_api_key = emb_cfg.get("api_key") or api_cfg["api_key"]
     client = OpenAI(
-        base_url=api_cfg["base_url"],
-        api_key=api_cfg["api_key"],
+        base_url=emb_base_url,
+        api_key=emb_api_key,
         timeout=api_cfg.get("timeout", 120),
         max_retries=5,
     )
@@ -65,7 +67,14 @@ def compute_paragraph_embeddings(
     if settings is None:
         settings = load_settings()
     emb_cfg = settings.get("embedding", {})
-    batch_size = emb_cfg.get("batch_size", _DEFAULT_BATCH_SIZE)
+    emb_context_length = emb_cfg.get("context_length")
+    if emb_cfg.get("batch_size"):
+        batch_size = emb_cfg["batch_size"]
+    elif emb_context_length:
+        from server.app.services.model_config_service import ModelConfigService
+        batch_size = ModelConfigService.calculate_embedding_batch_size(emb_context_length)
+    else:
+        batch_size = _DEFAULT_BATCH_SIZE
     max_workers = emb_cfg.get("max_workers", _DEFAULT_MAX_WORKERS)
 
     texts = []

@@ -5,7 +5,7 @@ import { appendFileSync, mkdirSync, existsSync } from "fs";
 const PORT = parseInt(process.env.HAHA_CODE_PORT || "3000", 10);
 const ROOT_DIR = import.meta.dir;
 const CLI_PATH = join(ROOT_DIR, "src", "entrypoints", "cli.tsx");
-const REVIEW_TIMEOUT = parseInt(process.env.REVIEW_TIMEOUT_MS || "600000", 10); // 10 min
+const REVIEW_TIMEOUT = parseInt(process.env.REVIEW_TIMEOUT_MS || "1200000", 10); // 20 min
 
 // 日志目录：保存错误日志和工具调用流摘要
 const LOG_DIR = join(ROOT_DIR, "logs");
@@ -13,6 +13,55 @@ const ERROR_LOG_FILE = join(LOG_DIR, "review-errors.log");
 try {
   mkdirSync(LOG_DIR, { recursive: true });
 } catch {}
+
+// Dynamic config — can be updated via /config endpoint
+const dynamicConfig = {
+  ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL || "",
+  ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN || "",
+  ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL || "",
+  ANTHROPIC_DEFAULT_SONNET_MODEL: process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || "",
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL || "",
+};
+
+interface ConfigUpdate {
+  mode: string;
+  anthropic_base_url?: string;
+  anthropic_auth_token?: string;
+  anthropic_model?: string;
+  anthropic_sonnet_model?: string;
+  anthropic_haiku_model?: string;
+}
+
+function writeConfigToEnv(config: ConfigUpdate): void {
+  // Update memory mapping
+  if (config.anthropic_base_url) dynamicConfig.ANTHROPIC_BASE_URL = config.anthropic_base_url;
+  if (config.anthropic_auth_token) dynamicConfig.ANTHROPIC_AUTH_TOKEN = config.anthropic_auth_token;
+  if (config.anthropic_model) dynamicConfig.ANTHROPIC_MODEL = config.anthropic_model;
+  if (config.anthropic_sonnet_model) dynamicConfig.ANTHROPIC_DEFAULT_SONNET_MODEL = config.anthropic_sonnet_model;
+  if (config.anthropic_haiku_model) dynamicConfig.ANTHROPIC_DEFAULT_HAIKU_MODEL = config.anthropic_haiku_model;
+
+  // Write to .env file for Bun.spawn subprocesses (they read via --env-file=.env)
+  const envPath = join(ROOT_DIR, ".env");
+  const envLines: string[] = [];
+  for (const [key, value] of Object.entries(dynamicConfig)) {
+    envLines.push(`${key}=${value}`);
+  }
+  // Preserve non-ANTHROPIC env vars from current .env
+  const existingEnvKeys = ["API_TIMEOUT_MS", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_TELEMETRY", "HAHA_CODE_PORT", "REVIEW_TIMEOUT_MS"];
+  for (const k of existingEnvKeys) {
+    if (process.env[k]) {
+      envLines.push(`${k}=${process.env[k]}`);
+    }
+  }
+  Bun.write(envPath, envLines.join("\n") + "\n");
+
+  // Update process.env so current server process also uses new config
+  for (const [key, value] of Object.entries(dynamicConfig)) {
+    process.env[key] = value;
+  }
+
+  console.log("[haha-code] Config updated:", JSON.stringify(config));
+}
 
 interface ReviewRequest {
   clause: {
@@ -64,24 +113,70 @@ ${req.tender_context}
   prompt += `## 投标文件位置
 文件夹路径：${req.folder_path}
 
+**重要提示**：投标文件的 MD 文件中，段落末尾的 \`[图片: imageX]\` 标记和紧随其后的 \`> [图片描述]\` 块代表图片确实存在。审查时请将图片描述视为已查看原图，基于描述内容判断图片是否满足条款要求，不要以"未找到图片"或"图片缺失"为由判定不合规。
+
 请先调用 /bid-review skill，skill 会自动读取投标文件文件夹进行审查。如果 skill 未被自动触发，请手动输入 /bid-review 后跟随上述条款信息。`;
   return prompt;
 }
 
-function parseResult(stdout: string): ReviewResult {
-  // 从输出中提取 JSON
-  const jsonMatch = stdout.match(/\{[\s\S]*"result"[\s\S]*\}/);
-  if (jsonMatch) {
-    try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        result: parsed.result || "error",
-        confidence: parseInt(parsed.confidence) || 0,
-        reason: parsed.reason || "",
-        locations: Array.isArray(parsed.locations) ? parsed.locations : [],
-      };
-    } catch {}
+/** 用栈平衡法提取所有顶层 JSON 对象 */
+function extractJsonObjects(text: string): string[] {
+  const results: string[] = [];
+  let depth = 0, start = -1;
+  let inStr = false, esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (esc) { esc = false; continue; }
+    if (ch === "\\") { if (inStr) esc = true; continue; }
+    if (ch === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (ch === "{") { if (depth === 0) start = i; depth++; }
+    else if (ch === "}") { depth--; if (depth === 0 && start >= 0) { results.push(text.slice(start, i + 1)); start = -1; } }
   }
+  return results;
+}
+
+function tryParse(text: string): any {
+  try { return JSON.parse(text); } catch { return null; }
+}
+
+function parseResult(stdout: string): ReviewResult {
+  let cleanStdout = stdout.trim();
+  // 移除 ```json ... ``` 或 ``` ... ``` 包裹
+  const fenceMatch = cleanStdout.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (fenceMatch) cleanStdout = fenceMatch[1];
+
+  // 策略1: 有 locations 数组 — 贪心匹配到 ]}
+  let jsonMatch = cleanStdout.match(/\{[\s\S]*?"result"[\s\S]*\]\}/);
+  if (jsonMatch) {
+    let parsed = tryParse(jsonMatch[0]);
+    if (!parsed) {
+      // 多 JSON 连在一起导致 parse 失败，用栈平衡法拆分
+      const objs = extractJsonObjects(jsonMatch[0]);
+      for (let i = objs.length - 1; i >= 0; i--) { parsed = tryParse(objs[i]); if (parsed?.result) break; }
+    }
+    if (parsed?.result) return { result: parsed.result, confidence: parseInt(parsed.confidence) || 0, reason: parsed.reason || "", locations: Array.isArray(parsed.locations) ? parsed.locations : [] };
+  }
+
+  // 策略2: 无 locations — 匹配到 "} 且后面无更多 [{
+  jsonMatch = cleanStdout.match(/\{[\s\S]*?"result"[\s\S]*"\}(?![\s\S]*[\[\{])/);
+  if (jsonMatch) {
+    const parsed = tryParse(jsonMatch[0]);
+    if (parsed?.result) return { result: parsed.result, confidence: parseInt(parsed.confidence) || 0, reason: parsed.reason || "", locations: Array.isArray(parsed.locations) ? parsed.locations : [] };
+  }
+
+  // 策略3: 回退 — 贪心匹配到最后一个 }
+  jsonMatch = cleanStdout.match(/\{[\s\S]*?"result"[\s\S]*\}/);
+  if (jsonMatch) {
+    let parsed = tryParse(jsonMatch[0]);
+    if (!parsed) {
+      const objs = extractJsonObjects(jsonMatch[0]);
+      for (let i = objs.length - 1; i >= 0; i--) { parsed = tryParse(objs[i]); if (parsed?.result) break; }
+    }
+    if (parsed?.result) return { result: parsed.result, confidence: parseInt(parsed.confidence) || 0, reason: parsed.reason || "", locations: Array.isArray(parsed.locations) ? parsed.locations : [] };
+  }
+
+  console.error(`[haha-code] All strategies failed. stdout preview: ${stdout.slice(0, 300)}`);
   return {
     result: "error",
     confidence: 0,
@@ -189,6 +284,22 @@ const server = Bun.serve({
       return Response.json({ status: "ok" });
     }
 
+    // Config update endpoint
+    if (url.pathname === "/config" && req.method === "POST") {
+      try {
+        const config = await req.json() as ConfigUpdate;
+        writeConfigToEnv(config);
+        return Response.json({ status: "ok", config: dynamicConfig });
+      } catch (e: any) {
+        return Response.json({ error: `Config update failed: ${e.message}` }, { status: 500 });
+      }
+    }
+
+    // Config query endpoint
+    if (url.pathname === "/config" && req.method === "GET") {
+      return Response.json(dynamicConfig);
+    }
+
     // Static file server: serve images from tender_folder for URL-based image references
     // e.g. /files/data/reviews/xxx/tender_folder/images/img001.jpg
     if (url.pathname.startsWith("/files/")) {
@@ -236,7 +347,7 @@ const server = Bun.serve({
             "--max-turns",
             "100",
             "--system-prompt",
-            "你是资深招标审查专家。请调用 /bid-review skill 进行审查。先阅读 _图片索引.md 了解所有图片的 AI 预描述。图片描述已嵌入 MD 文件，无需读取原始图片。严格只输出 JSON 结果。",
+            "你是资深招标审查专家。请调用 /bid-review skill 进行审查。先阅读 _图片索引.md 了解所有图片的 AI 预描述。MD 文件中的 [图片: imageX] 标记和 > [图片描述] 块代表图片确实存在，不要判定图片缺失。基于图片描述内容判断是否合规。严格只输出 JSON 结果。",
           ],
           {
             cwd: ROOT_DIR,

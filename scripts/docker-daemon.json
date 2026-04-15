@@ -1,0 +1,8 @@
+{
+  "registry-mirrors": [
+    "https://docker.1ms.run",
+    "https://docker.xuanyuan.me",
+    "https://hub.rat.dev",
+    "https://registry.dockermirror.com"
+  ]
+}

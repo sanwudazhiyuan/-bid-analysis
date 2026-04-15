@@ -87,7 +87,14 @@ def get_chapter_text(
 logger = logging.getLogger(__name__)
 
 LEAF_SPLIT_THRESHOLD = 1200
-MAX_CHARS_PER_BATCH = 30000
+
+def get_max_chars_per_batch(settings: dict | None = None) -> int:
+    """Calculate max chars per batch from context_length in settings.
+    Approximate conversion: 1 token ≈ 1.5 chars for Chinese text."""
+    if settings and settings.get("api", {}).get("context_length"):
+        max_input_tokens = settings["api"]["context_length"] - settings["api"].get("max_output_tokens", 8192) - 1500
+        return max(2000, int(max_input_tokens * 1.5))  # token→char conversion
+    return 30000  # cloud default
 
 
 @dataclass
@@ -127,6 +134,7 @@ def get_text_for_clause(
     paths: list[str],
     tender_index: dict,
     paragraphs: list,
+    settings: dict | None = None,
 ) -> list[ClauseBatch]:
     """为单个条款获取精确段落批次。
 
@@ -145,7 +153,7 @@ def get_text_for_clause(
             continue
 
         if len(node_paras) > LEAF_SPLIT_THRESHOLD:
-            sub_batches = _split_by_char_count(node_paras, MAX_CHARS_PER_BATCH)
+            sub_batches = _split_by_char_count(node_paras, get_max_chars_per_batch(settings))
             for i, sub_paras in enumerate(sub_batches):
                 batches.append(ClauseBatch(
                     clause_index=clause_index,

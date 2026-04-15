@@ -3,7 +3,7 @@
 import datetime
 import uuid
 
-from sqlalchemy import String, Integer, BigInteger, Text, DateTime, ForeignKey, func
+from sqlalchemy import String, Integer, BigInteger, Text, DateTime, ForeignKey, Boolean, func
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -31,6 +31,7 @@ class Task(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
     started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime)
     completed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime)
+    needs_reindex: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
     annotations = relationship("Annotation", back_populates="task", cascade="all, delete-orphan")
     generated_files = relationship("GeneratedFile", back_populates="task", cascade="all, delete-orphan")
