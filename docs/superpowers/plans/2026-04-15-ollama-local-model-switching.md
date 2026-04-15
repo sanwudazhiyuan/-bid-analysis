@@ -22,6 +22,7 @@
 
 ### Modified Files
 - `server/app/models/__init__.py` — Register SystemConfig model
+- `server/app/models/task.py` — Add `needs_reindex` boolean field
 - `server/app/main.py` — Startup: init config from DB, mount config router
 - `src/config.py` — Add `load_settings_from_dict()` function for DB→yaml sync
 - `src/extractor/base.py` — `batch_paragraphs()` max_tokens from dynamic config
@@ -80,6 +81,37 @@ Run: `docker-compose up -d server` and check logs for `system_config` table crea
 ```bash
 git add server/app/models/system_config.py server/app/models/__init__.py
 git commit -m "feat: add SystemConfig ORM model for model configuration storage"
+```
+
+---
+
+### Task 1b: Add `needs_reindex` field to Task model
+
+**Files:**
+- Modify: `server/app/models/task.py`
+
+- [ ] **Step 1: Add `needs_reindex` boolean column**
+
+Add after line 33 (`completed_at`) in `server/app/models/task.py`:
+
+```python
+    needs_reindex: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+```
+
+Also add the `Boolean` import to the SQLAlchemy import line (line 6):
+```python
+from sqlalchemy import String, Integer, BigInteger, Text, DateTime, ForeignKey, Boolean, func
+```
+
+- [ ] **Step 2: Verify table gets new column on startup**
+
+Run: `docker-compose up -d server` and check that `needs_reindex` column is created (via `Base.metadata.create_all` which adds missing columns for new deployments; for existing databases, a manual `ALTER TABLE tasks ADD COLUMN needs_reindex BOOLEAN DEFAULT false;` may be needed).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add server/app/models/task.py
+git commit -m "feat: add needs_reindex boolean field to Task model for embedding dimension change detection"
 ```
 
 ---
@@ -190,6 +222,7 @@ from pathlib import Path
 
 import httpx
 import yaml
+import asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -219,6 +252,17 @@ class ModelConfigService:
     @staticmethod
     async def save_config_async(db: AsyncSession, config_data: dict, user_id: int) -> SystemConfig:
         existing = await ModelConfigService.get_current_config_async(db)
+        # Check embedding dimension change — if changed, mark all tasks as needs_reindex
+        old_dimensions = None
+        new_dimensions = None
+        if existing and existing.local_embedding_config:
+            old_dimensions = existing.local_embedding_config.get("dimensions")
+        if config_data.get("local_embedding_config"):
+            new_dimensions = config_data["local_embedding_config"].get("dimensions")
+        if old_dimensions and new_dimensions and old_dimensions != new_dimensions:
+            from server.app.models.task import Task
+            await db.execute(Task.__table__.update().values(needs_reindex=True))
+
         if existing:
             existing.mode = config_data["mode"]
             existing.cloud_config = config_data.get("cloud_config", existing.cloud_config)
@@ -392,13 +436,22 @@ class ModelConfigService:
                 "anthropic_haiku_model": haha.get("anthropic_haiku_model", ""),
             }
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(f"{haha_url}/config", json=payload)
-                resp.raise_for_status()
-                logger.info("haha-code config update successful: %s", resp.json())
-                return True
+            # Retry up to 3 times with short delay
+            for attempt in range(3):
+                try:
+                    async with httpx.AsyncClient(timeout=10) as client:
+                        resp = await client.post(f"{haha_url}/config", json=payload)
+                        resp.raise_for_status()
+                        logger.info("haha-code config update successful (attempt %d)", attempt + 1)
+                        return True
+                except httpx.ConnectError:
+                    if attempt < 2:
+                        await asyncio.sleep(2)
+                        continue
+                    raise
         except Exception as e:
-            logger.error("Failed to notify haha-code: %s", e)
+            logger.error("Failed to notify haha-code after 3 retries: %s", e)
+            # Do NOT rollback — DB is authoritative, haha-code will catch up on next task start
             return False
 
     # --- Startup initialization ---
@@ -499,9 +552,11 @@ async def update_config(
     config = await ModelConfigService.save_config_async(db, config_data, admin.id)
     await db.commit()
 
-    # Side effects: sync yaml, notify haha-code
+    # Side effects: sync yaml, notify haha-code (best-effort, no rollback)
     ModelConfigService.sync_to_yaml(config)
-    await ModelConfigService.notify_haha_code(config)
+    haha_ok = await ModelConfigService.notify_haha_code(config)
+    if not haha_ok:
+        logger.warning("haha-code notification failed — config saved to DB but haha-code will use stale config until restart")
 
     # Refresh from DB for response
     await db.refresh(config)
