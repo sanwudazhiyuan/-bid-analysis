@@ -108,7 +108,7 @@ class ModelConfigService:
                             context_length = int(value)
                         except (ValueError, TypeError):
                             pass
-                    if "embedding_dim" in key or "dimensions" in key:
+                    if "embedding_length" in key or "embedding_dim" in key or "dimensions" in key:
                         try:
                             dimensions = int(value)
                         except (ValueError, TypeError):
