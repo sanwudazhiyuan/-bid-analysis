@@ -71,10 +71,10 @@ function stepStatus(stepKey: string) {
     if (props.progress >= 95) activeByProgress = steps.findIndex(s => s.key === 'generating')
     else if (props.progress >= 15) activeByProgress = steps.findIndex(s => s.key === 'reviewing')
     else if (props.progress >= 13) activeByProgress = steps.findIndex(s => s.key === 'building')
-    else if (props.progress >= 12) activeByProgress = steps.findIndex(s => s.key === 'mapping')
+    else if (props.progress >= 12) activeByProgress = steps.findIndex(s => s.key === 'describing')
+    else if (props.progress >= 11) activeByProgress = steps.findIndex(s => s.key === 'mapping')
     else if (props.progress >= 10) activeByProgress = steps.findIndex(s => s.key === 'extracting')
-    else if (props.progress >= 7) activeByProgress = steps.findIndex(s => s.key === 'describing')
-    else if (props.progress >= 5) activeByProgress = steps.findIndex(s => s.key === 'indexing')
+    else activeByProgress = steps.findIndex(s => s.key === 'indexing')
     if (activeByProgress < 0) activeByProgress = 0
     currentIdx = activeByProgress
   }

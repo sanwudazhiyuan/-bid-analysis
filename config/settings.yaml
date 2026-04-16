@@ -1,23 +1,18 @@
 api:
-  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  api_key: "${DASHSCOPE_API_KEY}"  # 从环境变量读取
-  model: "qwen3.5-plus"
-  temperature: 0.1
-  max_output_tokens: 65536
-  enable_thinking: false
+  api_key: ollama
+  base_url: http://10.165.44.28:11434/v1
+  context_length: 262144
+  max_output_tokens: 81920
+  model: gemma4:31b
   retry: 3
+  temperature: 0.4
+  think: true
   timeout: 600
-
 embedding:
-  model: "text-embedding-v3"
-  dimensions: 1024
-  batch_size: 10
+  base_url: http://10.165.44.28:11434/v1
+  batch_size: 50
+  context_length: 40960
+  dimensions: 4096
   max_workers: 4
-  similarity_threshold: 0.5
-
-output:
-  dir: "output"
-
-logging:
-  console_level: "INFO"
-  file_level: "DEBUG"
+  model: qwen3-embedding:latest
+  similarity_threshold: 0.65

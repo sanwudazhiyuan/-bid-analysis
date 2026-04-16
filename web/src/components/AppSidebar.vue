@@ -30,7 +30,7 @@ function isActive(path: string) {
 <template>
   <aside class="w-[200px] min-w-[200px] bg-surface border-r border-border flex flex-col h-screen">
     <div class="px-4 py-4 font-bold text-text-primary text-base">
-      招标分析系统
+      智能招投标文档分析系统
     </div>
 
     <nav class="flex-1 flex flex-col">

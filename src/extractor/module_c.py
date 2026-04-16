@@ -17,19 +17,11 @@ from src.extractor.base import (
     batch_paragraphs,
     merge_batch_results,
 )
+from src.extractor.scoring import filter_paragraphs_by_score
 
 logger = logging.getLogger(__name__)
 
 PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" / "module_c.txt"
-
-_RELEVANT_TAGS = {"评分", "报价", "合同条款", "商务要求"}
-_RELEVANT_SECTION_KEYWORDS = [
-    "评标", "评分", "评审", "打分", "计分", "得分",
-    "评标办法", "评分标准", "评分表", "评标标准",
-    "报价", "价格", "商务", "技术评审",
-    "后评价", "评价管理", "分配规则", "分配方式",
-    "报价要求", "报价明细", "限价",
-]
 
 
 _REF_PATTERNS = [
@@ -83,84 +75,35 @@ def _filter_paragraphs(
     tagged_paragraphs: list[TaggedParagraph],
     embeddings_map: dict[int, list[float]] | None = None,
     module_embedding: list[float] | None = None,
-) -> list[TaggedParagraph]:
-    """筛选与评标办法和评分标准相关的段落。
+) -> tuple[list[TaggedParagraph], dict[int, int]]:
+    """得分制筛选与评标办法和评分标准相关的段落。返回 (段落列表, 得分映射)。"""
+    selected, score_map = filter_paragraphs_by_score(
+        tagged_paragraphs, "module_c",
+        embeddings_map=embeddings_map,
+        module_embedding=module_embedding,
+        min_count=5,
+    )
 
-    评分内容可能出现在：
-    - 评标办法专章
-    - 评分表/评分标准附件
-    - 投标须知中的评标相关条款
-    """
-    text_keywords = [
-        "评标", "评分", "评审", "打分", "计分", "得分",
-        "总分", "满分", "权重", "分值",
-        "报价得分", "价格得分", "技术得分", "商务得分",
-        "最低价", "基准价", "综合评分", "评标委员会",
-        "扣分", "加分", "不得分",
-        # 报价与商务扩展
-        "报价方式", "报价范围", "报价限制", "限价", "单价",
-        "后评价", "评价指标", "评价运用",
-        "分配规则", "分配比例",
-        "履约保证金",
-    ]
-
-    selected = []
-    selected_indices = set()
-
-    for tp in tagged_paragraphs:
-        if tp.index in selected_indices:
-            continue
-
-        if tp.section_title and any(kw in tp.section_title for kw in _RELEVANT_SECTION_KEYWORDS):
-            selected.append(tp)
-            selected_indices.add(tp.index)
-            continue
-
-        if tp.tags and _RELEVANT_TAGS & set(tp.tags):
-            selected.append(tp)
-            selected_indices.add(tp.index)
-            continue
-
-        if any(kw in tp.text for kw in text_keywords):
-            selected.append(tp)
-            selected_indices.add(tp.index)
-            continue
-
-    # 评分表可能在表格中，检查包含数字分值的段落
+    # 评分表可能在表格中，额外检查包含数字分值的段落
+    selected_indices = {tp.index for tp in selected}
     for tp in tagged_paragraphs:
         if tp.index in selected_indices:
             continue
         if tp.table_data and ("分" in tp.text or "%" in tp.text):
             selected.append(tp)
             selected_indices.add(tp.index)
-
-    if len(selected) < 5 and len(tagged_paragraphs) > 0:
-        mid = len(tagged_paragraphs) // 2
-        count = max(int(len(tagged_paragraphs) * 0.2), 10)
-        for tp in tagged_paragraphs[mid : mid + count]:
-            if tp.index not in selected_indices:
-                selected.append(tp)
-                selected_indices.add(tp.index)
-
-    # 向量语义匹配补漏
-    if embeddings_map and module_embedding:
-        from src.extractor.embedding import filter_by_similarity
-        extra = filter_by_similarity(
-            tagged_paragraphs, embeddings_map, module_embedding,
-            exclude_indices=selected_indices,
-        )
-        for tp in extra:
-            selected.append(tp)
-            selected_indices.add(tp.index)
+            score_map[tp.index] = 0
 
     # 交叉引用解析：检测已筛选段落中的引用，追加被引用段落
     ref_appended = _resolve_references(selected, tagged_paragraphs, selected_indices)
     if ref_appended:
         selected.extend(ref_appended)
+        for tp in ref_appended:
+            score_map[tp.index] = 0
         logger.info("module_c: 交叉引用追加了 %d 个段落", len(ref_appended))
 
     selected.sort(key=lambda tp: tp.index)
-    return selected
+    return selected, score_map
 
 
 def extract_module_c(
@@ -170,7 +113,7 @@ def extract_module_c(
     module_embedding: list[float] | None = None,
 ) -> dict | None:
     """提取 C. 评标办法与评分标准。"""
-    filtered = _filter_paragraphs(
+    filtered, score_map = _filter_paragraphs(
         tagged_paragraphs,
         embeddings_map=embeddings_map,
         module_embedding=module_embedding,
@@ -182,7 +125,7 @@ def extract_module_c(
     logger.info("module_c: 筛选到 %d 个相关段落 (共 %d)", len(filtered), len(tagged_paragraphs))
 
     system_prompt = load_prompt_template(str(PROMPT_PATH))
-    input_text = build_input_text(filtered)
+    input_text = build_input_text(filtered, score_map)
     total_tokens = estimate_tokens(input_text)
     logger.info("module_c: 输入文本约 %d tokens", total_tokens)
 
@@ -192,7 +135,7 @@ def extract_module_c(
         batches = batch_paragraphs(filtered, max_tokens=120000)
         results = []
         for i, batch in enumerate(batches):
-            batch_text = build_input_text(batch)
+            batch_text = build_input_text(batch, score_map)
             messages = build_messages(system=system_prompt, user=batch_text)
             batch_result = call_qwen(messages, settings)
             if batch_result:

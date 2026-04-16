@@ -353,7 +353,7 @@ const server = Bun.serve({
             cwd: ROOT_DIR,
             stdout: "pipe",
             stderr: "pipe",
-            env: { ...process.env },
+            env: { ...process.env, ...dynamicConfig },
           }
         );
 
@@ -423,7 +423,7 @@ ${stdout.slice(0, 5000)}
               cwd: ROOT_DIR,
               stdout: "pipe",
               stderr: "pipe",
-              env: { ...process.env },
+              env: { ...process.env, ...dynamicConfig },
             }
           );
 

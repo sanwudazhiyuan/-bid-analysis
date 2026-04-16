@@ -1,4 +1,5 @@
 """Router for bid document review — create, list, detail, delete, progress, preview, download."""
+import logging
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
@@ -13,6 +14,7 @@ from server.app.services.review_service import (
 )
 
 router = APIRouter(prefix="/api/reviews", tags=["reviews"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -24,6 +26,10 @@ async def create_review_endpoint(
     db: AsyncSession = Depends(get_db),
 ):
     review = await create_review(db, tender_file, bid_task_id, user.id, review_mode=review_mode)
+    # 撤销当前用户所有进行中的 Celery 任务，避免与新任务互相干扰
+    from server.app.services.celery_utils import revoke_user_active_tasks  # noqa: PLC0415
+    revoked = revoke_user_active_tasks(user.id)
+    logger.info("Revoked %d active Celery tasks for user %d before starting new review", revoked, user.id)
     # Dispatch Celery task
     from server.app.tasks.review_task import run_review
     celery_result = run_review.delay(str(review.id))
@@ -175,74 +181,30 @@ async def preview_review(
     if not review or review.status != "completed":
         raise HTTPException(status_code=404, detail="审查结果不存在")
 
-    # Build para_index → review item mapping
-    para_review_map: dict[int, list[dict]] = {}
-    for item in (review.review_items or []):
-        if item.get("result") in ("fail", "warning"):
-            for loc in item.get("tender_locations", []):
-                for pi in loc.get("para_indices", []):
-                    para_review_map.setdefault(pi, []).append(item)
-
-    # Generate HTML with data-review-id attributes
-    from server.app.routers.files import _para_to_html, _table_to_html
-    from docx import Document
-    from docx.oxml.ns import qn
-
-    doc = Document(review.tender_file_path)
-    body = doc.element.body
-    parts = []
-    element_idx = 0
-    para_idx = 0
-    table_idx = 0
-
-    for child in body:
-        if child.tag == qn("w:p"):
-            if para_idx < len(doc.paragraphs):
-                html_str = _para_to_html(doc.paragraphs[para_idx])
-                if html_str and element_idx in para_review_map:
-                    items = para_review_map[element_idx]
-                    review_ids = " ".join(str(item["id"]) for item in items)
-                    result = "fail" if any(i["result"] == "fail" for i in items) else "warning"
-                    css_class = f"review-highlight review-{result}"
-                    html_str = html_str.replace(
-                        "<p", f'<p data-review-id="{review_ids}" class="{css_class}"', 1
-                    )
-                if html_str:
-                    parts.append((html_str, element_idx))
-                para_idx += 1
-            element_idx += 1
-        elif child.tag == qn("w:tbl"):
-            if table_idx < len(doc.tables):
-                parts.append((_table_to_html(doc.tables[table_idx]), element_idx))
-                table_idx += 1
-            element_idx += 1
-
-    # Build image map for inline display
     summary = review.review_summary or {}
-    extracted_images = summary.get("extracted_images", [])
-    para_image_map: dict[int, list[str]] = {}
-    for img in extracted_images:
-        pi = img.get("near_para_index")
-        if pi is not None:
-            para_image_map.setdefault(pi, []).append(img["filename"])
 
-    # Inject <img> tags after elements that contain images
-    from html import escape as html_escape
-    final_parts = []
-    for html_part, elem_idx in parts:
-        final_parts.append(html_part)
-        if elem_idx in para_image_map:
-            for fn in para_image_map[elem_idx]:
-                safe_fn = html_escape(fn)
-                final_parts.append(
-                    f'<div class="review-image" data-para-index="{elem_idx}">'
-                    f'<img src="/api/reviews/{review_id}/images/{safe_fn}" '
-                    f'alt="{safe_fn}" loading="lazy" />'
-                    f'</div>'
-                )
+    # Prefer pre-rendered HTML written at review completion time.
+    preview_path = summary.get("preview_html_path")
+    tender_html: str | None = None
+    if preview_path and os.path.exists(preview_path):
+        try:
+            with open(preview_path, "r", encoding="utf-8") as f:
+                tender_html = f.read()
+        except Exception:
+            tender_html = None
+
+    # Fallback: render on demand for reviews completed before this change.
+    if tender_html is None:
+        from server.app.services.review_preview import build_preview_html
+        tender_html = build_preview_html(
+            review.tender_file_path,
+            review.review_items or [],
+            summary.get("extracted_images", []),
+            review_id,
+        )
 
     return {
-        "tender_html": "\n".join(final_parts),
+        "tender_html": tender_html,
         "review_items": review.review_items or [],
         "summary": summary,
     }

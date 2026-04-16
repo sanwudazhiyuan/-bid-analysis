@@ -10,10 +10,10 @@ const store = useReviewStore()
 
 const reviewSteps = [
   { key: 'indexing', label: '索引' },
-  { key: 'describing', label: '图片描述' },
-  { key: 'building', label: '构建文件夹' },
   { key: 'extracting', label: '条款提取' },
   { key: 'mapping', label: '条款映射' },
+  { key: 'describing', label: '图片描述' },
+  { key: 'building', label: '构建文件夹' },
   { key: 'reviewing', label: '审查' },
   { key: 'generating', label: '生成报告' },
 ]

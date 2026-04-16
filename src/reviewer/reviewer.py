@@ -16,6 +16,16 @@ _FINAL_PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" 
 
 _IMAGE_MARKER_RE = re.compile(r"\[图片:\s*(.+?)\]")
 
+
+def _render_bid_reference_block(bid_reference: str | None) -> str:
+    """将招标原文上下文渲染为 prompt 中的 `{bid_reference_block}` 区段。
+
+    空值返回空串，非空时包裹在 Markdown 标题下。
+    """
+    if not bid_reference or not bid_reference.strip():
+        return ""
+    return f"\n## 招标文件相关原文（供条款理解参考）\n{bid_reference}\n"
+
 _MIME_MAP = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
     ".gif": "image/gif", ".bmp": "image/bmp",
@@ -73,12 +83,15 @@ def llm_review_clause(
     project_context: str,
     api_settings: dict | None = None,
     image_map: dict[str, str] | None = None,
+    bid_reference: str | None = None,
 ) -> dict:
     """Review a single clause against tender text. Returns review item dict.
 
     Args:
         image_map: filename → file_path 映射，用于将 [图片: xxx] 标记
                    替换为实际图片内容发送给多模态 LLM。
+        bid_reference: 条款对应的招标文件原文上下文（可选），
+                       会渲染到 prompt 的 `{bid_reference_block}` 区段。
     """
     prompt_template = _CLAUSE_PROMPT_PATH.read_text(encoding="utf-8")
     prompt = (
@@ -87,6 +100,7 @@ def llm_review_clause(
         .replace("{clause_text}", clause.get("clause_text", ""))
         .replace("{basis_text}", clause.get("basis_text", ""))
         .replace("{severity}", clause.get("severity", ""))
+        .replace("{bid_reference_block}", _render_bid_reference_block(bid_reference))
         .replace("{tender_text}", tender_text)
     )
 
@@ -150,6 +164,7 @@ def llm_review_clause_intermediate(
     prev_candidates: list[dict] | None = None,
     api_settings: dict | None = None,
     image_map: dict[str, str] | None = None,
+    bid_reference: str | None = None,
 ) -> dict:
     """非末批次审查：返回 candidates + summary，不做最终判定。"""
     prompt_template = _INTERMEDIATE_PROMPT_PATH.read_text(encoding="utf-8")
@@ -168,6 +183,7 @@ def llm_review_clause_intermediate(
         .replace("{clause_text}", clause.get("clause_text", ""))
         .replace("{basis_text}", clause.get("basis_text", ""))
         .replace("{severity}", clause.get("severity", ""))
+        .replace("{bid_reference_block}", _render_bid_reference_block(bid_reference))
         .replace("{prev_context}", prev_context)
         .replace("{tender_text}", tender_text)
     )
@@ -212,6 +228,7 @@ def llm_review_clause_final(
     all_candidates: list[dict],
     api_settings: dict | None = None,
     image_map: dict[str, str] | None = None,
+    bid_reference: str | None = None,
 ) -> dict:
     """末批次审查：综合所有前序发现，做最终判定。
 
@@ -232,6 +249,7 @@ def llm_review_clause_final(
         .replace("{clause_text}", clause.get("clause_text", ""))
         .replace("{basis_text}", clause.get("basis_text", ""))
         .replace("{severity}", clause.get("severity", ""))
+        .replace("{bid_reference_block}", _render_bid_reference_block(bid_reference))
         .replace("{accumulated_summary}", accumulated_summary or "（首批次，无前序摘要）")
         .replace("{candidates_text}", candidates_text)
         .replace("{tender_text}", tender_text)

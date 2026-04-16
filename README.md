@@ -67,21 +67,36 @@
 
 | 模块 | 提取内容 | 筛选策略 | 严重级别 |
 |------|---------|---------|---------|
-| **Module A** | 项目基本信息 | 关键词 + 标签匹配 | - |
-| **Module B** | 投标人资格条件 | 章节标题匹配 + 语义向量搜索 | major |
-| **Module C** | 评标办法与评分标准 | 评分关键词 + 表格段落检测 | minor |
-| **Module D** | 合同主要条款 | 合同关键词 + 标签匹配 | - |
-| **Module E** | 废标/无效标风险提示 | 全文扫描 + 交叉引用解析 | critical |
-| **Module F** | 投标文件编制要求 | 格式关键词 + 全文扫描 | major |
-| **Module G** | 开评标流程 | 流程关键词 + 标签匹配 | - |
-| **bid_format** | 投标文件格式模板 | 两次 LLM 调用（先判断有无模板，无则 fallback 构建） | - |
-| **checklist** | 投标所需资料清单 | 全文扫描 + 语义向量搜索 | - |
+| **Module A** | 项目基本信息 | 关键词得分 + 标签匹配 | - |
+| **Module B** | 投标人资格条件 | 关键词得分 + 语义向量搜索 | major |
+| **Module C** | 评标办法与评分标准 | 关键词得分 + 表格段落检测 | minor |
+| **Module D** | 合同主要条款 | 关键词得分 + 标签匹配 | - |
+| **Module E** | 废标/无效标风险提示 | 关键词得分 + 交叉引用解析 | critical |
+| **Module F** | 投标文件编制要求 | 关键词得分 + 全文扫描 | major |
+| **Module G** | 开评标流程 | 关键词得分 + 标签匹配 | - |
+| **bid_format** | 投标文件格式模板 | 关键词得分 + 两次 LLM 调用 | - |
+| **checklist** | 投标所需资料清单 | 关键词得分 + 语义向量搜索 | - |
+
+**段落筛选 — 关键词得分制**：
+
+各模块的段落筛选现已升级为**关键词得分制**（`config/keyword_scores.yaml`），替代了原来各模块独立实现的 `_filter_paragraphs()` 方法：
+
+1. **得分计算**：对每个段落根据 3 类关键词（章节标题、正文、标签）匹配计算加权得分
+   - 高档关键词 = 7 分（如 Module E 的"废标"、"无效"）
+   - 中档关键词 = 4 分（如 Module B 的"注册资本"、"ISO"）
+   - 低档关键词 = 2 分（如 Module F 的"签章"、"密封"）
+2. **阈值过滤**：得分低于模块阈值的段落直接丢弃（各模块独立阈值，如 Module E 为 5 分）
+3. **向量补漏**：对被丢弃的段落用语义向量匹配补充（threshold=0.5）
+4. **最低数量保障**：若筛选后段落数 < min_count，从剩余段落中取得分最高的补够
+5. **原文顺序排列**：最终输出按段落索引排序，保持文档结构
+
+**核心优势**：统一配置、可调权重、得分可追溯、向量语义兜底
 
 **每个模块的提取流程**：
-1. **段落筛选** — 结合章节标题匹配、标签过滤、关键词搜索、向量语义相似度（threshold=0.5）
+1. **段落筛选** — 关键词得分制 + 语义向量补漏（见上文）
 2. **交叉引用解析** — 检测"详见附件X"、"见第X款"等引用，自动追加分段
-3. **分批处理** — 超过 120K tokens 时自动按章节边界分批，防止 LLM 上下文超限
-4. **LLM 提取** — 通义千问 qwen3.5-plus 模型，结构化 JSON 输出
+3. **分批处理** — 超过上下文限制时自动按章节边界分批，防止 LLM 上下文超限
+4. **LLM 提取** — 云端/本地模型，结构化 JSON 输出
 5. **JSON 修复** — 自动处理 LLM 常见错误（尾部逗号、单引号、控制字符）
 6. **表格渲染** — Word 表格转为 Markdown 格式输入 LLM，确保评分细则完整解析
 
@@ -219,7 +234,7 @@ tender_folder/
 - 表格以 Markdown 表格格式渲染
 
 #### Step 5-6: Agent 自主审查（15-95%）
-**核心创新**：不是 LLM 直接审查，而是驱动 Claude Code Agent 自主执行审查：
+**核心创新**：不是 LLM 直接审查，而是驱动 Agent 自主执行审查：
 
 1. **构建审查提示词**：
    - 条款内容 + 条款依据 + 严重程度
@@ -270,10 +285,10 @@ tender_folder/
 | 后端 API | FastAPI + SQLAlchemy 2.0 (async) | 异步 RESTful API |
 | 数据库 | PostgreSQL 16 | 支持 JSONB 存储非结构化数据 |
 | 任务队列 | Celery + Redis | 异步审查管线（长任务不阻塞 API） |
-| AI 审查 Agent | Claude Code (Ink TUI) | 自主工具调用（Read/Glob/Grep） |
-| AI 模型 | 通义千问 qwen3.5-plus / 3.5-flash | 关闭思考模式 + JSON 结构化输出 |
+| AI 审查 Agent | haha-code Agent | 自主工具调用（Read/Glob/Grep） |
+| AI 模型 | 通义千问 / Ollama 本地模型 | 支持云端和本地部署切换 |
 | 文档解析 | python-docx + antiword + pdfplumber | .docx/.doc/.pdf 统一接口 |
-| 部署 | Docker Compose | 7 个容器一键启动 |
+| 部署 | Docker Compose | 7 容器一键启动 |
 
 ### 4.2 系统架构图
 
@@ -284,6 +299,10 @@ tender_folder/
 │  │ 登录认证  │  │ 招标解读  │  │ 标书审查  │  │  文件管理     │    │
 │  │ (JWT)    │  │ (5步骤)  │  │(固定/智能)│  │ (CRUD+预览)  │    │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────────┘    │
+│                           ┌──────────────┐                      │
+│                           │ 管理员配置    │  ← NEW               │
+│                           │(模型/模式切换)│                      │
+│                           └──────────────┘                      │
 └──────────────────────────┬──────────────────────────────────────┘
                            │ HTTPS
 ┌──────────────────────────▼──────────────────────────────────────┐
@@ -300,7 +319,11 @@ tender_folder/
                     │  │  /auth/*    │  │  /tasks/*   │  │/reviews │ │
                     │  │             │  │  /files/*   │  │/*       │ │
                     │  └─────────────┘  └─────────────┘  └────┬────┘ │
-                    └─────────────────────────────────────────┼──────┘
+                    │  ┌─────────────────────────────────────────┐   │
+                    │  │  管理员配置路由 /admin/config/*  ← NEW    │   │
+                    │  │  (模型切换、Ollama 发现、连接测试)        │   │
+                    │  └─────────────────────────────────────────┘   │
+                    └────────────────────────────────────────────────┘
                                                               │
                     ┌─────────────────────────────────────────┼────────────────────────────┐
                     │                                         │                            │
@@ -311,12 +334,19 @@ tender_folder/
                └─────────┘                               └─────────                      │
                                                                                      ────┴────┐
                                                                                      │         │
-                                                                            ┌────────▼───┐ ┌──▼────────┐
-                                                                            │ haha-code  │ │ 通义千问   │
-                                                                            │  Agent     │ │ DashScope │
-                                                                            │  :3000     │ │  API      │
-                                                                            │(审查技能)  │ └───────────┘
-                                                                            └────────────┘
+                    ┌──────────────────────────────────────────────────────────────────┐
+                    │                 双模式 AI 服务  ← NEW                             │
+                    │  ┌──────────────────────┐    ┌──────────────────────────────┐    │
+                    │  │  云端模式 (DashScope)  │    │  本地模式 (Ollama)  ← NEW    │    │
+                    │  │  qwen3.5-plus API     │    │  gemma4/qwen3 + 嵌入模型     │    │
+                    │  └──────────────────────┘    └──────────────────────────────┘    │
+                    └──────────────────────────────────────────────────────────────────┘
+                                                                                     ┌────────▼───┐
+                                                                                     │ haha-code  │
+                                                                                     │  Agent     │
+                                                                                     │  :3000     │
+                                                                                     │(审查技能)  │
+                                                                                     └────────────┘
 ```
 
 ### 4.3 数据流
@@ -324,7 +354,7 @@ tender_folder/
 ```
 招标解读数据流:
   用户上传 .docx ──→ 文档解析 (Paragraphs) ──→ 智能索引 (Sections + TaggedParagraphs)
-      ──→ 结构提取 (9模块 JSON) ──→ 人工审核 (Annotations) ──→ 文档生成 (3个 .docx)
+      ──→ 关键词得分筛选 + 向量补漏 ──→ 结构提取 (9模块 JSON) ──→ 人工审核 ──→ 文档生成
 
 标书审查数据流（固定审核）:
   用户上传投标文件 ──→ 提取条款 (Clauses) ──→ 映射到投标文件章节 ──→ 提取原文
@@ -342,21 +372,68 @@ tender_folder/
 | 表格数据丢失 | `table_data` 渲染为 Markdown 输入 LLM | 评分细则不再标记为"未明确" |
 | 上下文超限 | 按章节边界自动分批，超长条款顺序累积审查 | 120K tokens 限制 |
 | JSON 格式不稳定 | `response_format: json_object` + 解析后修复 + 纠正指令 | LLM 输出非法 JSON |
-| 思考模式干扰 | `enable_thinking: false` | 减少 `<think>` 标签导致解析失败 |
+| 思考模式干扰 | `enable_thinking: false` / Ollama `think: true` + 独立字段 | 减少 `思考标签` 导致解析失败 |
 | 审查进度丢失 | 每 5 条同步写入 DB | 刷新页面后状态一致 |
 | 图片无法审查 | AI 预描述嵌入 MD 文件 | Agent 无需读原始图片 |
 | 页面刷新丢失进度 | localStorage + SSE 自动重连 | 网络断开/刷新后恢复 |
+| 段落筛选不稳定 | 关键词得分制（`keyword_scores.yaml`） | 统一配置、可调权重、得分可追溯 |
+| 本地模型支持 | 管理员配置 UI + Ollama 发现 + DB 持久化 | 内网环境无需外网 API |
 
 ---
 
-## 五、快速开始
+## 五、管理员功能 — NEW
 
-### 5.1 环境要求
+管理员（`role=admin`）可通过侧边栏 **「模型配置」** 页面切换系统运行模式：
+
+### 5.1 云端模式 vs 本地模式
+
+| 模式 | LLM 服务 | Embedding 服务 | Smart Review Agent |
+|------|---------|---------------|-------------------|
+| **云端模式** | DashScope API（qwen3.5-plus） | DashScope API | DashScope Anthropic 端点 |
+| **本地模式** | Ollama 自部署模型 | Ollama 自部署嵌入模型 | Ollama 兼容端点 |
+
+### 5.2 本地模式配置流程
+
+管理员在「模型配置」页面操作：
+
+1. **切换到本地模式** — 点击「本地模式 (Ollama)」按钮
+2. **LLM 配置**：
+   - 输入 Ollama 服务器地址（如 `http://10.165.44.28:11434`）
+   - 点击「连接测试」→ 自动发现已拉取的模型列表
+   - 选择 LLM 模型 → 自动获取上下文长度、自动配置
+3. **Embedding 配置**：
+   - 输入 Ollama 服务器地址（可与 LLM 共用或独立）
+   - 连接测试 → 选择嵌入模型 → 自动获取维度和上下文长度
+   - 嵌入维度变更会触发警告：已有索引将失效，需重新解析
+4. **Smart Review 配置**：
+   - 自动关联 LLM 服务器地址
+   - 选择 Sonnet / Haiku / 默认审查模型
+5. **保存配置** — 配置写入数据库，同步更新 `settings.yaml`，并热更新 haha-code Agent
+
+### 5.3 Ollama 发现 API
+
+管理员配置页面提供以下 API 端点（仅管理员可访问）：
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/admin/config` | 获取当前系统配置 |
+| `PUT /api/admin/config` | 更新配置（含模式切换） |
+| `GET /api/admin/config/ollama/models?server_url=` | 发现 Ollama 已安装模型 |
+| `GET /api/admin/config/ollama/info?server_url=&model=` | 获取模型详细信息（上下文长度、嵌入维度） |
+| `GET /api/admin/config/ollama/test?server_url=&model=` | 测试 Ollama 连接 |
+
+---
+
+## 六、快速开始
+
+### 6.1 环境要求
 
 - Docker & Docker Compose
-- 通义千问 API Key（[DashScope 控制台](https://dashscope.console.aliyun.com/)获取）
+- AI 模型服务（二选一）：
+  - **云端模式**：通义千问 API Key（[DashScope 控制台](https://dashscope.console.aliyun.com/)获取）
+  - **本地模式**：Ollama 服务器（已拉取 LLM 和 Embedding 模型）
 
-### 5.2 安装部署
+### 6.2 安装部署
 
 ```bash
 # 1. 克隆项目
@@ -365,18 +442,30 @@ cd -bid-analysis
 
 # 2. 配置环境变量
 cp .env.example .env
-# 编辑 .env，填入 DB_PASSWORD、DASHSCOPE_API_KEY、JWT_SECRET
+# 编辑 .env，填入：
+#   - DB_PASSWORD（数据库密码）
+#   - DASHSCOPE_API_KEY（云端模式时填写，本地模式可不填）
+#   - JWT_SECRET（JWT 签名密钥）
 
 # 3. 一键启动
 docker compose up -d --build
 ```
 
-### 5.3 访问地址
+### 6.3 本地模式配置（首次使用）
+
+启动后以管理员账号登录，进入侧边栏「模型配置」页面：
+
+1. 切换到「本地模式」
+2. 输入 Ollama 服务器地址并测试连接
+3. 选择 LLM 和 Embedding 模型
+4. 保存配置
+
+### 6.4 访问地址
 
 - **前端界面**: http://localhost
 - **API 文档**: http://localhost:8000/docs
 
-### 5.4 使用流程
+### 6.5 使用流程
 
 #### 招标解读
 ```
@@ -390,38 +479,39 @@ docker compose up -d --build
 
 ---
 
-## 六、项目结构
+## 七、项目结构
 
 ```
 ├── web/                    # 前端 (Vue 3 SPA)
 │   ├── src/
-│   │   ├── views/          # 页面（登录、招标解读、标书审查、文件管理、审查结果）
+│   │   ├── views/          # 页面（登录、招标解读、标书审查、审查结果、管理员配置 ← NEW）
 │   │   ├── components/     # 组件（上传、处理进度、审核、预览等阶段组件）
 │   │   ├── composables/    # 组合式函数（useSSE 实时进度订阅）
 │   │   ├── stores/         # Pinia 状态管理
-│   │   ├── api/            # Axios API 封装
+│   │   ├── api/            # Axios API 封装（含 configApi ← NEW）
 │   │   └── assets/         # 设计令牌 (Tailwind @theme)
 ├── server/                 # 后端 (FastAPI)
 │   ├── app/
-│   │   ├── routers/        # API 路由（认证、任务、文件、审查、用户）
-│   │   ├── services/       # 业务逻辑层
-│   │   ├── models/         # ORM 模型（Task, ReviewTask, User, Annotation 等）
+│   │   ├── routers/        # API 路由（认证、任务、文件、审查、用户、管理员配置 ← NEW）
+│   │   ├── services/       # 业务逻辑层（含 ModelConfigService ← NEW）
+│   │   ├── models/         # ORM 模型（Task, ReviewTask, User, SystemConfig ← NEW 等）
 │   │   ├── tasks/          # Celery 异步任务（review_task 审查管线）
 │   │   └── schemas/        # Pydantic 模型
-├── haha-code/              # AI 审查 Agent（基于 Claude Code）
-│   ├── server.ts           # HTTP 服务（/review 端点）
+├── haha-code/              # AI 审查 Agent
+│   ├── server.ts           # HTTP 服务（/review + /config ← NEW 端点）
 │   ├── skills/             # Skills 系统（bid-review 审查技能）
-│   ├── src/                # Claude Code 核心（TUI、工具、服务层）
+│   ├── src/                # Agent 核心（TUI、工具、服务层）
 │   └── tests/              # Agent 集成测试
 ├── src/
 │   ├── parser/             # 文档解析（docx、pdf、doc）
-│   ├── extractor/          # AI 提取引擎（9 个模块提取器）
+│   ├── extractor/          # AI 提取引擎（9 个模块提取器 + scoring.py ← NEW 得分制）
 │   ├── indexer/            # 智能索引引擎（TOC + 编号 + 关键词）
 │   ├── reviewer/           # 审查引擎（条款提取、映射、审查、批注生成）
 │   └── generator/          # 文档生成（报告、格式、清单）
 ├── config/
 │   ├── prompts/            # LLM 提示词模板（12 个 prompt 文件）
-│   ├── settings.yaml       # 全局配置
+│   ├── keyword_scores.yaml # ← NEW 关键词得分制配置
+│   ├── settings.yaml       # 全局配置（DB 同步写入，云端模式含 ${DASHSCOPE_API_KEY} 占位符）
 │   └── tag_rules.yaml      # 段落分类规则
 ├── docker-compose.yml      # 7 容器编排
 └── requirements.txt
@@ -429,6 +519,6 @@ docker compose up -d --build
 
 ---
 
-## 七、许可证
+## 八、许可证
 
 [MIT](LICENSE)

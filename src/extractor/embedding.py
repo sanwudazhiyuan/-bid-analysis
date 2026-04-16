@@ -14,7 +14,7 @@ _DEFAULT_MODEL = "text-embedding-v3"
 _DEFAULT_DIMENSIONS = 1024
 _DEFAULT_BATCH_SIZE = 10
 _DEFAULT_MAX_WORKERS = 4
-_DEFAULT_THRESHOLD = 0.5
+_DEFAULT_THRESHOLD = 0.65
 
 
 def cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:

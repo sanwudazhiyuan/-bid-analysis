@@ -187,7 +187,7 @@ class ModelConfigService:
                 "temperature": llm.get("temperature", 0.1),
                 "max_output_tokens": llm.get("max_output_tokens", 8192),
                 "context_length": llm.get("context_length"),
-                "enable_thinking": False,
+                "think": True,  # Ollama think=True 保留思考，reasoning_content 在独立字段返回
                 "retry": llm.get("retry", 3),
                 "timeout": llm.get("timeout", 600),
             },

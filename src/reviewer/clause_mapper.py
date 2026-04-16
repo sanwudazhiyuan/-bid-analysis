@@ -149,12 +149,19 @@ def llm_map_clauses_to_leaf_nodes(
     clauses: list[dict],
     tender_index: dict,
     api_settings: dict | None = None,
-    max_workers: int = 8,
+    max_workers: int | None = None,
 ) -> dict[int, list[str]]:
     """逐条并发映射条款到章节节点。Returns {clause_index: [path, ...]}.
 
     每个条款独立调用 LLM 映射，比批量映射更准确，通过并发保持效率。
+    本地模式默认 2 并发，云模式默认 8。
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if max_workers is None:
+        base_url = (api_settings or {}).get("api", {}).get("base_url", "")
+        is_local = "/v1" in base_url and "dashscope" not in base_url
+        max_workers = 2 if is_local else 8
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     chapter_list_text, id_to_path = _build_numbered_chapter_list(tender_index)

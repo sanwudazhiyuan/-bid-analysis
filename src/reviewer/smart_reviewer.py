@@ -8,7 +8,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 HAHA_CODE_URL = os.environ.get("HAHA_CODE_URL", "http://haha-code:3000")
-REVIEW_TIMEOUT = int(os.environ.get("SMART_REVIEW_TIMEOUT", "900"))  # 15 min
+REVIEW_TIMEOUT = int(os.environ.get("SMART_REVIEW_TIMEOUT", "1200"))  # 20 min
 SMART_REVIEW_RETRIES = int(os.environ.get("SMART_REVIEW_RETRIES", "2"))
 
 
@@ -84,8 +84,15 @@ def _normalize_result(data: dict, clause: dict) -> dict:
     normalized_locations = []
     for loc in locations:
         if isinstance(loc, dict) and loc.get("para_index") is not None:
+            # 安全转换 para_index：LLM/agent 可能返回非整数如 '未提供'、'[图片: xxx]'
+            pi = loc["para_index"]
+            try:
+                pi = int(pi)
+            except (TypeError, ValueError):
+                logger.warning("Smart review: skipping invalid para_index '%s' for clause %d", pi, clause["clause_index"])
+                continue
             normalized_locations.append({
-                "para_index": loc["para_index"],
+                "para_index": pi,
                 "text_snippet": loc.get("text_snippet", ""),
                 "reason": loc.get("reason", ""),
             })
@@ -100,12 +107,18 @@ def _normalize_result(data: dict, clause: dict) -> dict:
             "per_para_reasons": per_para_reasons,
         })
 
+    # 安全转换 confidence
+    try:
+        confidence = int(data.get("confidence", 0))
+    except (TypeError, ValueError):
+        confidence = 0
+
     return {
         "source_module": clause.get("source_module", ""),
         "clause_index": clause["clause_index"],
         "clause_text": clause.get("clause_text", ""),
         "result": data.get("result", "error"),
-        "confidence": int(data.get("confidence", 0)),
+        "confidence": confidence,
         "reason": data.get("reason", ""),
         "severity": clause.get("severity", "minor"),
         "tender_locations": tender_locations,

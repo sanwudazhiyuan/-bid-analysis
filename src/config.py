@@ -83,3 +83,8 @@ def load_styles() -> dict:
 
 def load_module_descriptions() -> dict:
     return _load_yaml("module_descriptions.yaml")
+
+
+def load_keyword_scores() -> dict:
+    """加载关键词得分制配置。"""
+    return _load_yaml("keyword_scores.yaml")

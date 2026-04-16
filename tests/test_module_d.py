@@ -51,7 +51,7 @@ def test_module_d_prompt_exists():
 
 def test_module_d_filter_paragraphs(indexed_doc):
     from src.extractor.module_d import _filter_paragraphs
-    filtered = _filter_paragraphs(indexed_doc["tagged_paragraphs"])
+    filtered, score_map = _filter_paragraphs(indexed_doc["tagged_paragraphs"])
     assert len(filtered) > 0, "应筛选出合同条款相关段落"
 
 

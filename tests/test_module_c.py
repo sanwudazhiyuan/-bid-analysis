@@ -51,7 +51,7 @@ def test_module_c_prompt_exists():
 
 def test_module_c_filter_paragraphs(indexed_doc):
     from src.extractor.module_c import _filter_paragraphs
-    filtered = _filter_paragraphs(indexed_doc["tagged_paragraphs"])
+    filtered, score_map = _filter_paragraphs(indexed_doc["tagged_paragraphs"])
     assert len(filtered) > 0, "应筛选出评分标准相关段落"
 
 
@@ -69,7 +69,7 @@ def test_filter_paragraphs_includes_commercial_content():
         TaggedParagraph(index=5, text="履约保证金金额为20万元"),
         TaggedParagraph(index=6, text="这是一段无关内容"),
     ]
-    filtered = _filter_paragraphs(paragraphs)
+    filtered, score_map = _filter_paragraphs(paragraphs)
     filtered_indices = {tp.index for tp in filtered}
     assert 0 in filtered_indices, "评分相关段落应被选中"
     assert 1 in filtered_indices, "报价方式段落应被选中"

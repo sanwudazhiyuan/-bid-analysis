@@ -68,7 +68,7 @@ def test_module_a_filter_paragraphs(indexed_doc):
     """module_a 应能从索引结果中筛选出相关段落"""
     from src.extractor.module_a import _filter_paragraphs
 
-    filtered = _filter_paragraphs(indexed_doc["tagged_paragraphs"])
+    filtered, score_map = _filter_paragraphs(indexed_doc["tagged_paragraphs"])
     assert len(filtered) > 0, "应筛选出项目信息相关段落"
 
 

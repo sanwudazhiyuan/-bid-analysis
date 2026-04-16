@@ -14,7 +14,7 @@
 条款内容：{clause_text}
 原文依据：{basis_text}
 严重程度：{severity}
-
+{bid_reference_block}
 ## 前序批次审查摘要
 {accumulated_summary}
 

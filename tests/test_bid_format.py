@@ -51,7 +51,7 @@ def test_bid_format_prompt_exists():
 
 def test_bid_format_filter_paragraphs(indexed_doc):
     from src.extractor.bid_format import _filter_paragraphs
-    filtered = _filter_paragraphs(indexed_doc["tagged_paragraphs"])
+    filtered, score_map = _filter_paragraphs(indexed_doc["tagged_paragraphs"])
     assert len(filtered) > 0
 
 

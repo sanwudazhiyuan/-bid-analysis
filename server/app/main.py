@@ -29,7 +29,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="招标文件分析系统", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="智能招投标文档分析系统", version="1.0.0", lifespan=lifespan)
 
 # Simple in-memory rate limiting
 _rate_limits: dict[str, list[float]] = defaultdict(list)

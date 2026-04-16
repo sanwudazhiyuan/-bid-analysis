@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import uuid as _uuid
 
@@ -27,6 +28,7 @@ from server.app.services.task_service import (
 )
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("", response_model=TaskListResponse)
@@ -103,6 +105,11 @@ async def confirm_task(
 ):
     """用户确认后启动分析管线。"""
     task = await start_pending_task(db, task_id, user.id)
+
+    # 撤销当前用户所有进行中的 Celery 任务，避免与新任务互相干扰
+    from server.app.services.celery_utils import revoke_user_active_tasks  # noqa: PLC0415
+    revoked = revoke_user_active_tasks(user.id)
+    logger.info("Revoked %d active Celery tasks for user %d before starting new pipeline", revoked, user.id)
 
     from server.app.tasks.pipeline_task import run_pipeline  # noqa: PLC0415
 

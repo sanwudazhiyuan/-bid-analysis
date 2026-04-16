@@ -24,7 +24,10 @@ def extract_images(file_path: str, output_dir: str) -> list[dict]:
         output_dir: Directory to save extracted images.
 
     Returns:
-        List of dicts: [{filename, path, near_para_index, content_type}]
+        List of dicts: [{filename, path, near_para_index, near_para_indices, content_type}]
+
+        near_para_indices is the full list of paragraph indices that reference this image;
+        near_para_index is kept as indices[0] for backward compatibility.
     """
     ext = os.path.splitext(file_path)[1].lower()
     if ext == ".docx":
@@ -61,7 +64,10 @@ def _extract_from_docx(file_path: str, output_dir: str) -> list[dict]:
                         rid_to_media[rid] = target.split("/")[-1]
 
             # Find paragraph positions of images via document.xml
-            para_image_map = {}  # media_filename → para_index
+            # A single physical image can be referenced by multiple paragraphs
+            # (e.g., same certificate appears in both 资格证明 and 技术部分 chapters).
+            # We must record ALL referencing paragraphs, not just the last one.
+            para_image_map: dict[str, list[int]] = {}  # media_filename → [para_index, ...]
             if "word/document.xml" in zf.namelist():
                 from lxml import etree
                 doc_xml = etree.fromstring(zf.read("word/document.xml"))
@@ -103,37 +109,50 @@ def _extract_from_docx(file_path: str, output_dir: str) -> list[dict]:
                                 if embed and embed in rid_to_media:
                                     found_images.append(rid_to_media[embed])
 
+                            def _append_ref(media_fn: str, idx: int) -> None:
+                                lst = para_image_map.setdefault(media_fn, [])
+                                if not lst or lst[-1] != idx:
+                                    lst.append(idx)
+
                             if has_text:
-                                # 独立图片段落的图片应关联到前一个文字段落（标题），
-                                # 而非延后到当前段落。这样图片描述会嵌入到正确的章节中。
-                                target_idx = para_idx - 1 if para_idx > 0 else para_idx
+                                # 图片专用段落（无文字仅有图片）通常与紧随其后的文字段落
+                                # 属于同一逻辑内容（如证书图片+证书标题），应关联到当前
+                                # 文字段落的索引，而非前一个段落。
                                 for media_fn in pending_images:
-                                    para_image_map[media_fn] = target_idx
+                                    _append_ref(media_fn, para_idx)
                                 pending_images.clear()
                                 # Assign current paragraph's images
                                 for media_fn in found_images:
-                                    para_image_map[media_fn] = para_idx
+                                    _append_ref(media_fn, para_idx)
                                 para_idx += 1
                             else:
                                 # Image-only paragraph: defer to next text paragraph
                                 pending_images.extend(found_images)
                         elif child.tag == w_tbl:
-                            # Flush pending images to the preceding text paragraph's index
-                            target_idx = para_idx - 1 if para_idx > 0 else para_idx
+                            # Flush pending images to the table's index (images visually
+                            # adjacent to the table should be associated with it).
                             for media_fn in pending_images:
-                                para_image_map[media_fn] = target_idx
+                                lst = para_image_map.setdefault(media_fn, [])
+                                if not lst or lst[-1] != para_idx:
+                                    lst.append(para_idx)
                             pending_images.clear()
                             # Table images
                             blip_elems = child.findall(".//a:blip", ns)
                             for blip in blip_elems:
                                 embed = blip.get(f"{{{ns['r']}}}embed")
                                 if embed and embed in rid_to_media:
-                                    para_image_map[rid_to_media[embed]] = para_idx
+                                    media_fn = rid_to_media[embed]
+                                    lst = para_image_map.setdefault(media_fn, [])
+                                    if not lst or lst[-1] != para_idx:
+                                        lst.append(para_idx)
                             para_idx += 1
                     # Handle trailing pending images (assign to last index)
                     if pending_images and para_idx > 0:
+                        tail_idx = para_idx - 1
                         for media_fn in pending_images:
-                            para_image_map[media_fn] = para_idx - 1
+                            lst = para_image_map.setdefault(media_fn, [])
+                            if not lst or lst[-1] != tail_idx:
+                                lst.append(tail_idx)
 
             # Extract each media file
             for media_path in media_files:
@@ -149,10 +168,12 @@ def _extract_from_docx(file_path: str, output_dir: str) -> list[dict]:
 
                 content_type = _MIME_TYPES[ext_lower]
 
+                indices = para_image_map.get(filename, [])
                 images.append({
                     "filename": filename,
                     "path": out_path,
-                    "near_para_index": para_image_map.get(filename),
+                    "near_para_index": indices[0] if indices else None,
+                    "near_para_indices": indices,
                     "content_type": content_type,
                 })
 
@@ -162,7 +183,7 @@ def _extract_from_docx(file_path: str, output_dir: str) -> list[dict]:
     logger.info(
         "图片提取完成: %d 张, 映射关系: %s",
         len(images),
-        {img["filename"]: img.get("near_para_index") for img in images}
+        {img["filename"]: img.get("near_para_indices") for img in images}
     )
     return images
 
@@ -203,6 +224,7 @@ def _extract_from_pdf(file_path: str, output_dir: str) -> list[dict]:
                         "filename": filename,
                         "path": out_path,
                         "near_para_index": None,  # PDF images lack precise paragraph mapping
+                        "near_para_indices": [],
                         "content_type": content_type,
                         "page": page_num + 1,
                     })

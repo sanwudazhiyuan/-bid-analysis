@@ -37,6 +37,7 @@ def run_review(self, review_id: str):
     from src.config import load_settings, load_settings_from_db
 
     api_settings = load_settings_from_db() or load_settings()
+    is_local_mode = "/v1" in (api_settings.get("api", {}).get("base_url", "").lower()) and "dashscope" not in api_settings.get("api", {}).get("base_url", "").lower()
 
     with Session(_sync_engine) as db:
         review = db.get(ReviewTask, _uuid.UUID(review_id))
@@ -97,22 +98,42 @@ def run_review(self, review_id: str):
             logger.info("PII desensitization: %d items masked", len(pii_mapping))
 
             # Inject image markers AFTER index is built
+            # 按图片在文档中实际出现顺序排列，而非 docx 内部 media 文件名排序
+            # 每张图片的 near_para_index 反映其首次出现的段落位置，
+            # 同一段落内多张图片按 near_para_index + 在 para_image_map 中的插入顺序排列。
             index_to_pos = {p.index: pos for pos, p in enumerate(paragraphs)}
 
-            image_by_para = {}
-            for img in extracted_images:
+            # 构建段落→图片有序映射，确保同一段落内图片按文档出现顺序排列
+            # 先按 near_para_index（首次出现段落）排序图片，再按 near_para_indices
+            # 中的段落索引顺序构建 para→images 映射
+            # near_para_index 可能显式为 None（无法定位到段落的图片），排序时用 -1 兜底
+            def _sort_key(img):
+                indices = img.get("near_para_indices") or []
+                first_pi = indices[0] if indices else (img.get("near_para_index") or -1)
+                return (first_pi, first_pi)
+
+            sorted_images = sorted(extracted_images, key=_sort_key)
+
+            image_by_para: dict[int, list[str]] = {}
+            # image_order_in_para: 记录每张图片在其所属段落内的出现次序，
+            # 用于同一段落多图时保持文档原始顺序
+            image_para_order: dict[str, int] = {}  # filename → insertion_order
+            for order, img in enumerate(sorted_images):
                 indices = img.get("near_para_indices")
                 if not indices:
                     pi = img.get("near_para_index")
                     indices = [pi] if pi is not None else []
                 for pi in indices:
                     image_by_para.setdefault(pi, []).append(img["filename"])
+                image_para_order[img["filename"]] = order
 
             from dataclasses import replace as dc_replace
             for pi, filenames in image_by_para.items():
+                # 按 image_para_order 排序，确保同一段落内多图按文档出现顺序排列
+                sorted_fns = sorted(filenames, key=lambda fn: image_para_order.get(fn, 0))
                 pos = index_to_pos.get(pi)
                 if pos is not None:
-                    marker = " ".join(f"[图片: {fn}]" for fn in filenames)
+                    marker = " ".join(f"[图片: {fn}]" for fn in sorted_fns)
                     paragraphs[pos] = dc_replace(
                         paragraphs[pos],
                         text=paragraphs[pos].text + f" {marker}",
@@ -158,8 +179,10 @@ def run_review(self, review_id: str):
             db.commit()
 
             bid_indexed_data = _load_bid_indexed_data(bid_task)
-            mapping_settings = {**api_settings}
-            mapping_settings["api"] = {**mapping_settings.get("api", {}), "model": "qwen3.5-flash"}
+            # 条款映射使用当前配置的 LLM 模型
+            # 云模式: DashScope qwen3.5-flash（快速低成本）
+            # 本地模式: 使用 Ollama 当前配置的模型（gemma4:31b 等）
+            mapping_settings = api_settings
             clause_bid_contexts = build_clause_bid_contexts(
                 all_clauses, bid_indexed_data, bid_tagged_paragraphs, mapping_settings,
             )
@@ -185,23 +208,46 @@ def run_review(self, review_id: str):
 
                 import os
                 api_key = os.environ.get("DASHSCOPE_API_KEY", "")
-                image_descriptions = describe_images(api_key, extracted_images) if extracted_images else {}
+                # 本地模式: 用 Ollama 视觉模型; 云模式: 用 DashScope qwen3.5-flash
+                vision_base_url = api_settings.get("api", {}).get("base_url") if api_settings.get("api", {}).get("base_url") else None
+                vision_model = api_settings.get("api", {}).get("model") if api_settings.get("api", {}).get("model") else None
+                image_descriptions = describe_images(
+                    api_key, extracted_images,
+                    base_url=vision_base_url, model=vision_model,
+                ) if extracted_images else {}
 
                 # 按段落分组图片描述和图片文件名
                 # 同一张物理图片可能被多个段落引用（如证书同时出现在资格证明和技术部分），
                 # 需要将描述/文件名挂到所有引用段落，否则部分章节 MD 会缺失图片。
+                # 与固定审核模式一样，先按文档出现顺序排序图片，确保同一段落内多图顺序正确
+                sorted_images_smart = sorted(
+                    extracted_images, key=_sort_key
+                )
+                smart_image_order: dict[str, int] = {}  # filename → insertion_order
+                # 同时维护 filename→desc 映射，用于按 filename order 排序 desc 列表
+                filename_to_desc: dict[str, str] = {}
+                for fn, desc in image_descriptions.items():
+                    filename_to_desc[fn] = desc
+
                 image_para_map: dict[int, list[str]] = {}
                 image_para_files: dict[int, list[str]] = {}
-                for img in extracted_images:
+                for order, img in enumerate(sorted_images_smart):
                     indices = img.get("near_para_indices")
                     if not indices:
                         pi = img.get("near_para_index")
                         indices = [pi] if pi is not None else []
+                    smart_image_order[img["filename"]] = order
                     desc = image_descriptions.get(img["filename"], "")
                     for pi in indices:
                         if desc:
-                            image_para_map.setdefault(pi, []).append(desc)
+                            image_para_map.setdefault(pi, []).append(img["filename"])  # 先存 filename 用于排序
                         image_para_files.setdefault(pi, []).append(img["filename"])
+                # 同一段落内多图按文档出现顺序排列，然后把 filename 替换为对应的 description
+                for pi in image_para_map:
+                    image_para_map[pi] = sorted(image_para_map[pi], key=lambda fn: smart_image_order.get(fn, 0))
+                    image_para_map[pi] = [filename_to_desc.get(fn, fn) for fn in image_para_map[pi]]
+                for pi in image_para_files:
+                    image_para_files[pi] = sorted(image_para_files[pi], key=lambda fn: smart_image_order.get(fn, 0))
 
                 logger.info(
                     "图片映射分组: %d 张图片映射到 %d 个段落, image_para_map: %s, image_para_files: %s",
@@ -235,7 +281,7 @@ def run_review(self, review_id: str):
                 review.current_step = f"智能审查 [0/{len(all_clauses)}]"
                 db.commit()
 
-                SMART_MAX_WORKERS = 4
+                SMART_MAX_WORKERS = 2 if is_local_mode else 4
                 results_by_index: dict[int, dict] = {}
                 futures = {}
 
@@ -301,13 +347,43 @@ def run_review(self, review_id: str):
                 self.update_state(state="PROGRESS", meta={"step": "extracting", "progress": 12, "detail": "条款映射"})
                 clause_mapping = llm_map_clauses_to_leaf_nodes(clauses, tender_index, api_settings)
 
-                # 构建 image_map: filename → file_path，用于多模态审查
-                image_map = {}
+                # 构建全局 image_map: filename → file_path
+                global_image_map = {}
+                # 构建段落→图片文件名映射（用于条款级别的图片过滤）
+                para_to_image_files: dict[int, list[str]] = {}
                 for img in extracted_images:
                     if img.get("path") and img.get("filename"):
-                        image_map[img["filename"]] = img["path"]
-                if image_map:
-                    logger.info("Image map built: %d images available for multimodal review", len(image_map))
+                        global_image_map[img["filename"]] = img["path"]
+                    indices = img.get("near_para_indices")
+                    if not indices:
+                        pi = img.get("near_para_index")
+                        indices = [pi] if pi is not None else []
+                    for pi in indices:
+                        para_to_image_files.setdefault(pi, []).append(img["filename"])
+                if global_image_map:
+                    logger.info("Image map built: %d images available for multimodal review", len(global_image_map))
+
+                def _build_clause_image_map(batch_paragraphs: list) -> dict[str, str]:
+                    """根据条款映射到的段落，构建只包含相关图片的 image_map。
+
+                    避免将全局所有图片传给 LLM，防止图片顺序混淆（如银联证书图
+                    被误判为 EAL4+证书）。只传入条款映射段落中实际出现的图片。
+                    """
+                    clause_image_map = {}
+                    relevant_para_indices = {p.index for p in batch_paragraphs}
+                    for pi in relevant_para_indices:
+                        for fn in para_to_image_files.get(pi, []):
+                            if fn in global_image_map and fn not in clause_image_map:
+                                clause_image_map[fn] = global_image_map[fn]
+                    # 如果通过段落过滤没有找到任何图片，退回全局 image_map
+                    # （可能是因为图片段落索引与条款段落不精确对应）
+                    if not clause_image_map and global_image_map:
+                        logger.debug(
+                            "No images found for clause paragraphs %s, falling back to global image_map",
+                            sorted(relevant_para_indices),
+                        )
+                        clause_image_map = global_image_map
+                    return clause_image_map
 
                 # Step 5-7: 并发审查 (15-95%)
                 def _no_match_item(clause: dict) -> dict:
@@ -339,10 +415,11 @@ def run_review(self, review_id: str):
                     if len(batches) == 1:
                         batch = batches[0]
                         tender_text = paragraphs_to_text(batch.paragraphs)
+                        clause_image_map = _build_clause_image_map(batch.paragraphs)
                         try:
                             result = llm_review_clause(
                                 clause, tender_text, project_context, api_settings,
-                                image_map=image_map, bid_reference=bid_reference,
+                                image_map=clause_image_map, bid_reference=bid_reference,
                             )
                             return map_batch_indices_to_global(result, batch)
                         except Exception as e:
@@ -362,6 +439,7 @@ def run_review(self, review_id: str):
 
                         for i, batch in enumerate(batches):
                             tender_text = paragraphs_to_text(batch.paragraphs)
+                            clause_image_map = _build_clause_image_map(batch.paragraphs)
                             is_last = (i == len(batches) - 1)
 
                             if is_last:
@@ -369,15 +447,21 @@ def run_review(self, review_id: str):
                                     result = llm_review_clause_final(
                                         clause, tender_text, project_context,
                                         accumulated_summary, all_candidates,
-                                        api_settings, image_map=image_map,
+                                        api_settings, image_map=clause_image_map,
                                         bid_reference=bid_reference,
                                     )
                                     # 校验末批次 locations 的索引
+                                    # LLM 可能返回非整数 para_index（如 '未提供'），需 try/except
                                     batch_indices = {p.index for p in batch.paragraphs}
                                     validated_locations = []
                                     for loc in result.get("locations", []):
                                         pi = loc.get("para_index")
-                                        if pi is not None and int(pi) in batch_indices:
+                                        if pi is not None:
+                                            try:
+                                                pi = int(pi)
+                                            except (TypeError, ValueError):
+                                                pi = None
+                                        if pi is not None and pi in batch_indices:
                                             validated_locations.append(loc)
                                     result["locations"] = validated_locations
                                     return assemble_multi_batch_result(result, all_candidates)
@@ -398,15 +482,22 @@ def run_review(self, review_id: str):
                                         prev_summary=accumulated_summary,
                                         prev_candidates=all_candidates if all_candidates else None,
                                         api_settings=api_settings,
-                                        image_map=image_map,
+                                        image_map=clause_image_map,
                                         bid_reference=bid_reference,
                                     )
                                     # 校验候选索引是否在当前批次范围内
+                                    # LLM 可能返回非整数 para_index，需 try/except
                                     batch_indices = {p.index for p in batch.paragraphs}
-                                    valid_candidates = [
-                                        c for c in intermediate.get("candidates", [])
-                                        if c.get("para_index") is not None and int(c["para_index"]) in batch_indices
-                                    ]
+                                    valid_candidates = []
+                                    for c in intermediate.get("candidates", []):
+                                        pi = c.get("para_index")
+                                        if pi is not None:
+                                            try:
+                                                pi = int(pi)
+                                            except (TypeError, ValueError):
+                                                pi = None
+                                        if pi is not None and pi in batch_indices:
+                                            valid_candidates.append(c)
                                     all_candidates.extend(valid_candidates)
                                     accumulated_summary = intermediate.get("summary", accumulated_summary)
                                 except Exception as e:
@@ -414,7 +505,7 @@ def run_review(self, review_id: str):
                                     # 中间批次失败不致命，继续下一批次
                                     accumulated_summary += f"\n批次{batch.batch_id}审查失败: {e}"
 
-                MAX_WORKERS = 8
+                MAX_WORKERS = 2 if is_local_mode else 8
                 results_by_index: dict[int, dict] = {}
                 futures = {}
 

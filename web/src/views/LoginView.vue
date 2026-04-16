@@ -31,7 +31,7 @@ async function handleLogin() {
 <template>
   <div class="min-h-screen flex items-center justify-center bg-background">
     <div class="w-full max-w-md bg-surface rounded-lg shadow-md p-8">
-      <h1 class="text-2xl font-bold text-center text-text-primary mb-8">招标文件分析系统</h1>
+      <h1 class="text-2xl font-bold text-center text-text-primary mb-8">智能招投标文档分析系统</h1>
       <form @submit.prevent="handleLogin" class="space-y-6">
         <div>
           <label class="block text-sm font-medium text-text-secondary mb-1">用户名</label>

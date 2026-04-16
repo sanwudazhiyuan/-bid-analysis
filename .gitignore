@@ -7,5 +7,17 @@ output/
 .pytest_cache/
 config/settings.local.yaml
 .env
+haha-code/.env
 web/dist/
 web/node_modules/
+node_modules/
+package-lock.json
+.superpowers/
+temp_ref.md
+unpacked_ref/
+投标文档/
+招标文档/
+暗标要求/
+示例文档/
+软著/
+*.doc

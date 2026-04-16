@@ -33,7 +33,7 @@ def run_pipeline(self, task_id: str):
     from src.indexer.indexer import build_index
     from src.extractor.extractor import extract_single_module
     from src.persistence import save_parsed, save_indexed, save_extracted
-    from src.config import load_settings
+    from src.config import load_settings, load_settings_from_db
 
     with Session(_sync_engine) as db:
         task = _get_task(db, task_id)
@@ -83,7 +83,8 @@ def run_pipeline(self, task_id: str):
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from src.extractor.embedding import compute_paragraph_embeddings, compute_module_embeddings
 
-        api_settings = load_settings()
+        api_settings = load_settings_from_db() or load_settings()
+        is_local_mode = "/v1" in (api_settings.get("api", {}).get("base_url", "").lower()) and "dashscope" not in api_settings.get("api", {}).get("base_url", "").lower()
         tagged = index_result.get("tagged_paragraphs", [])
 
         self.update_state(
@@ -111,7 +112,7 @@ def run_pipeline(self, task_id: str):
 
         # Layer 4: Extract (25-90%) — 两阶段提取
         modules_result = {}
-        MAX_EXTRACT_WORKERS = 8
+        MAX_EXTRACT_WORKERS = 2 if is_local_mode else 8
 
         def _extract_module(module_key: str, extra_kwargs: dict | None = None) -> tuple[str, dict | None]:
             try:

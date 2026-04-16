@@ -14,7 +14,7 @@
 条款内容：{clause_text}
 原文依据：{basis_text}
 严重程度：{severity}
-
+{bid_reference_block}
 {prev_context}
 
 ## 当前批次投标文件内容
