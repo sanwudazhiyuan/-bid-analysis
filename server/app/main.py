@@ -12,6 +12,7 @@ from starlette.responses import JSONResponse
 from server.app.database import engine, Base, async_session_factory
 from server.app.routers import auth, tasks, download, preview, annotations, users, files, reviews, config as config_router
 import server.app.models.review_task  # noqa: F401 — ensure table is created
+import server.app.models.anbiao_review  # noqa: F401 — ensure table is created
 
 
 @asynccontextmanager
@@ -23,8 +24,19 @@ async def lifespan(app: FastAPI):
     # Initialize system_config from settings.yaml if not exists
     async with async_session_factory() as db:
         from server.app.services.model_config_service import ModelConfigService
-        await ModelConfigService.initialize_on_startup(db)
+        config = await ModelConfigService.initialize_on_startup(db)
         await db.commit()
+
+        # Sync haha-code config on startup so it matches current DB mode
+        # (haha-code container restarts lose runtime config, reverting to
+        # docker-compose defaults which are always cloud-mode DashScope)
+        if config:
+            ok = await ModelConfigService.notify_haha_code(config)
+            if not ok:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "haha-code startup sync failed — config in DB but haha-code may use stale defaults"
+                )
 
     yield
 
