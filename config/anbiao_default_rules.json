@@ -1,0 +1,62 @@
+[
+  {
+    "rule_text": "须编制连续的阿拉伯数字页码，第一页页码为\"1\"，页码在页面底端居中位置",
+    "rule_type": "format",
+    "is_mandatory": true,
+    "category": "页码"
+  },
+  {
+    "rule_text": "任何一页均不得设置页眉和页脚，只准出现页码",
+    "rule_type": "format",
+    "is_mandatory": true,
+    "category": "页眉页脚"
+  },
+  {
+    "rule_text": "所有文字均为黑色",
+    "rule_type": "format",
+    "is_mandatory": true,
+    "category": "文字颜色"
+  },
+  {
+    "rule_text": "如暗标文件分多个评审模块评审时，应分别编制各评审模块的暗标文件，每个评审模块的文件须独立生成连续的页码，正文第一页页码均为\"1\"",
+    "rule_type": "format",
+    "is_mandatory": true,
+    "category": "分模块页码"
+  },
+  {
+    "rule_text": "不得出现可识别投标人身份的任何字符、徽标、公司名称（包括简称、外文名称、外文简称）、公司网址（包括邮箱域名）、公司电话、资质证书编号、人员姓名、身份证号、证书编号、人员照片、可辨识的公章、企业标准名称或编号等",
+    "rule_type": "content",
+    "is_mandatory": true,
+    "category": "身份信息"
+  },
+  {
+    "rule_text": "不得出现过往业绩案例客户名称，如需体现客户名称应以\"某金融企业\"、\"某国有商业银行\"等代替",
+    "rule_type": "content",
+    "is_mandatory": true,
+    "category": "客户名称"
+  },
+  {
+    "rule_text": "不得出现任何涂改、行间插字或删除痕迹",
+    "rule_type": "content",
+    "is_mandatory": true,
+    "category": "文档痕迹"
+  },
+  {
+    "rule_text": "非必要不使用图片（包括人员照片、工作照片等）、图表、PPT幻灯片",
+    "rule_type": "content",
+    "is_mandatory": false,
+    "category": "图片使用"
+  },
+  {
+    "rule_text": "非必要不使用过往业绩案例",
+    "rule_type": "content",
+    "is_mandatory": false,
+    "category": "业绩案例"
+  },
+  {
+    "rule_text": "非必要不使用公司证书、人员证书",
+    "rule_type": "content",
+    "is_mandatory": false,
+    "category": "证书使用"
+  }
+]
