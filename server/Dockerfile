@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user and data directory
-RUN useradd -m -r appuser && mkdir -p /data/uploads /data/generated /data/reviews && chown -R appuser:appuser /data
+RUN useradd -m -r appuser && mkdir -p /data/uploads /data/generated /data/reviews /data/anbiao_reviews && chown -R appuser:appuser /data
 
 # Install Python dependencies
 COPY server/requirements.txt /app/server/requirements.txt
