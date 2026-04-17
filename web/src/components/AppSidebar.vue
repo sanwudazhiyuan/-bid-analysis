@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useRoute } from 'vue-router'
-import { PenLine, FolderOpen, BarChart3, Ruler, ClipboardList, ShieldCheck, FileCheck, Users, Settings } from 'lucide-vue-next'
+import { PenLine, FolderOpen, BarChart3, Ruler, ClipboardList, ShieldCheck, FileCheck, EyeOff, Users, Settings } from 'lucide-vue-next'
 import { useAuthStore } from '../stores/authStore'
 import UserMenu from './UserMenu.vue'
 
@@ -10,6 +10,7 @@ const authStore = useAuthStore()
 const navItems = [
   { path: '/', label: '招标解读', icon: PenLine, group: 'main' },
   { path: '/bid-review', label: '标书审查', icon: ShieldCheck, group: 'main' },
+  { path: '/anbiao-review', label: '暗标审查', icon: EyeOff, group: 'main' },
   { path: '/files/bid-documents', label: '招标文件', icon: FolderOpen, group: 'files' },
   { path: '/files/reports', label: '解析报告', icon: BarChart3, group: 'files' },
   { path: '/files/formats', label: '文件格式', icon: Ruler, group: 'files' },

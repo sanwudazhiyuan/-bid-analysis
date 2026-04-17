@@ -34,6 +34,11 @@ const routes = [
         component: () => import('../views/BidReviewView.vue'),
       },
       {
+        path: 'anbiao-review',
+        name: 'anbiao-review',
+        component: () => import('../views/AnbiaoReviewView.vue'),
+      },
+      {
         path: 'review-results',
         name: 'review-results',
         component: () => import('../views/ReviewResultsView.vue'),
