@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse
 
 from server.app.database import engine, Base, async_session_factory
 from server.app.routers import auth, tasks, download, preview, annotations, users, files, reviews, config as config_router
+from server.app.routers import anbiao_reviews
 import server.app.models.review_task  # noqa: F401 — ensure table is created
 import server.app.models.anbiao_review  # noqa: F401 — ensure table is created
 
@@ -78,6 +79,7 @@ app.include_router(users.router)
 app.include_router(files.router)
 app.include_router(reviews.router)
 app.include_router(config_router.router)
+app.include_router(anbiao_reviews.router)
 
 
 @app.get("/api/health")
