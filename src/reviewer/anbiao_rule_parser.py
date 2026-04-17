@@ -62,5 +62,49 @@ def merge_rules(
 
 
 def parse_anbiao_rules(file_path: str, api_settings: dict) -> list[AnbiaoRule]:
-    """解析暗标规则文档为逐条规则列表。（详见 Chunk 2 Task 4 实现）"""
-    raise NotImplementedError("Will be implemented in Task 4")
+    """解析暗标规则文档为逐条规则列表。
+
+    流程：
+    1. unified.py 解析文档
+    2. 拼接全文给 LLM 分类
+    3. LLM 分类每条规则（format/content/mandatory/category）
+    4. 过滤物理世界规则
+    """
+    from src.parser.unified import parse_document
+    from src.extractor.base import call_qwen, build_messages
+
+    paragraphs = parse_document(file_path)
+    if not paragraphs:
+        logger.warning("暗标规则文档解析为空: %s", file_path)
+        return []
+
+    # 拼接全文给 LLM 分类
+    rules_text = "\n".join(f"[{p.index}] {p.text}" for p in paragraphs if p.text.strip())
+
+    prompt_template = _CLASSIFY_PROMPT_PATH.read_text(encoding="utf-8")
+    prompt = prompt_template.replace("{rules_text}", rules_text)
+    messages = build_messages(system="你是暗标规则分析专家。", user=prompt)
+    result = call_qwen(messages, api_settings)
+
+    if not isinstance(result, list):
+        logger.error("LLM 规则分类返回格式错误: %s", type(result))
+        return []
+
+    rules = []
+    for idx, item in enumerate(result):
+        if not isinstance(item, dict):
+            continue
+        # 过滤物理世界规则
+        if item.get("is_physical", False):
+            continue
+        rules.append(AnbiaoRule(
+            rule_index=idx,
+            rule_text=item.get("rule_text", ""),
+            rule_type=item.get("rule_type", "content"),
+            source_section=item.get("source_section", "项目规则"),
+            is_mandatory=item.get("is_mandatory", True),
+            category=item.get("category", ""),
+        ))
+
+    logger.info("暗标规则解析: %d 条规则（已过滤物理世界规则）", len(rules))
+    return rules
