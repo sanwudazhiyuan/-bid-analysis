@@ -32,6 +32,24 @@ _CONTENT_FINAL_PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "p
 _CONTENT_CONCLUDE_PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" / "anbiao_content_review_conclude.txt"
 
 
+def _collect_leaf_chapters(chapters: list[dict], max_level: int = 3) -> list[dict]:
+    """递归展开章节树，收集叶子节点。
+
+    - 无 children 的节点：叶子
+    - level >= max_level 的节点：叶子（其 children 不再展开，自身整体作为一个批次）
+    - 其余：继续递归 children
+    """
+    leaves = []
+    for ch in chapters:
+        children = ch.get("children", [])
+        level = ch.get("level", 1)
+        if not children or level >= max_level:
+            leaves.append(ch)
+        else:
+            leaves.extend(_collect_leaf_chapters(children, max_level))
+    return leaves
+
+
 def review_format_rules(
     rules: list[AnbiaoRule],
     doc_format: DocumentFormat,
