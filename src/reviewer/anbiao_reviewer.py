@@ -1,6 +1,7 @@
 """暗标审查引擎：格式规则审查 + 内容规则审查。"""
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.extractor.base import call_qwen, build_messages
@@ -9,9 +10,26 @@ from src.reviewer.anbiao_rule_parser import AnbiaoRule
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class ChapterBatch:
+    """单个章节审核批次。
+
+    - text: 段落拼接文本（含 [p.index] 前缀）
+    - para_indices: 批次包含的全局段落索引
+    - chapter_title: 章节标题；兜底模式为 "段落批次 N"
+    - image_map: 批次专属 filename→绝对路径 映射
+    """
+    text: str
+    para_indices: list[int]
+    chapter_title: str
+    image_map: dict[str, str] = field(default_factory=dict)
+
+
 _FORMAT_PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" / "anbiao_format_review.txt"
 _CONTENT_PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" / "anbiao_content_review.txt"
 _CONTENT_FINAL_PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" / "anbiao_content_review_final.txt"
+_CONTENT_CONCLUDE_PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" / "anbiao_content_review_conclude.txt"
 
 
 def review_format_rules(
@@ -252,16 +270,43 @@ def review_content_rules(
                     accumulated_summary = f"{accumulated_summary}\n{summary}" if accumulated_summary else summary
             else:
                 # 单批次直接判定
-                result_val = llm_result.get("result", "error")
+                # LLM 可能返回两种格式：
+                #   A) result+confidence+reason+locations（标准最终格式）
+                #   B) candidates+summary（中间批次格式，某些模型在单批次时也会返回）
+                # 对 B 格式需要从 candidates 推导 result/confidence/reason
+                result_val = llm_result.get("result", None)
+                confidence = llm_result.get("confidence", None)
+                reason = llm_result.get("reason", None)
+
+                locations = llm_result.get("locations", [])
+                candidates = llm_result.get("candidates", [])
+
+                # 如果 LLM 返回中间批次格式（无 result），从 candidates 推导
+                if result_val is None:
+                    if candidates:
+                        # 有违规候选 → 判定不合规
+                        result_val = "fail" if rule.is_mandatory else "warning"
+                        # confidence: 有候选但非最终判定，给中等置信度
+                        if confidence is None:
+                            confidence = 70
+                        # reason: 从 candidates 或 summary 拼接
+                        if not reason:
+                            summary_text = llm_result.get("summary", "")
+                            cand_reasons = [c.get("reason", "") for c in candidates if c.get("reason")]
+                            reason = summary_text or "、".join(cand_reasons[:3]) or "发现违规内容"
+                    else:
+                        # 无违规候选 → 判定通过
+                        result_val = "pass"
+                        if confidence is None:
+                            confidence = 80
+                        if not reason:
+                            reason = "未发现违规内容"
+
                 if not rule.is_mandatory and result_val == "fail":
                     result_val = "warning"
 
-                locations = llm_result.get("locations", [])
-                if not locations:
-                    # 单批次可能返回 candidates 而非 locations
-                    candidates = llm_result.get("candidates", [])
-                    if candidates and result_val != "pass":
-                        locations = candidates
+                if not locations and candidates and result_val != "pass":
+                    locations = candidates
 
                 tender_locations = []
                 if locations:
@@ -282,8 +327,8 @@ def review_content_rules(
                     "clause_text": rule.rule_text,
                     "rule_type": "content",
                     "result": result_val,
-                    "confidence": int(llm_result.get("confidence", 0)),
-                    "reason": llm_result.get("reason", ""),
+                    "confidence": int(confidence or 0),
+                    "reason": reason or "",
                     "severity": "critical" if rule.is_mandatory else "minor",
                     "is_mandatory": rule.is_mandatory,
                     "tender_locations": tender_locations,
