@@ -44,3 +44,27 @@ def test_collect_leaf_chapters_stops_at_max_level():
     }]
     leaves = _collect_leaf_chapters(chapters, max_level=3)
     assert [l["title"] for l in leaves] == ["L3"]
+
+
+def test_filter_images_for_batch_matches_by_near_para_indices():
+    from src.reviewer.anbiao_reviewer import _filter_images_for_batch
+    images = [
+        {"filename": "a.png", "path": "/tmp/a.png", "near_para_indices": [2, 3]},
+        {"filename": "b.png", "path": "/tmp/b.png", "near_para_indices": [10]},
+    ]
+    result = _filter_images_for_batch([0, 1, 2, 3, 4, 5], images)
+    assert result == {"a.png": "/tmp/a.png"}
+
+
+def test_filter_images_for_batch_falls_back_to_near_para_index():
+    """near_para_indices 缺失时使用 near_para_index。"""
+    from src.reviewer.anbiao_reviewer import _filter_images_for_batch
+    images = [{"filename": "c.png", "path": "/tmp/c.png", "near_para_index": 7}]
+    assert _filter_images_for_batch([5, 6, 7], images) == {"c.png": "/tmp/c.png"}
+    assert _filter_images_for_batch([0, 1], images) == {}
+
+
+def test_filter_images_for_batch_skips_images_with_no_indices():
+    from src.reviewer.anbiao_reviewer import _filter_images_for_batch
+    images = [{"filename": "d.png", "path": "/tmp/d.png"}]
+    assert _filter_images_for_batch([0, 1, 2], images) == {}

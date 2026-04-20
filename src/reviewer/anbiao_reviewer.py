@@ -50,6 +50,26 @@ def _collect_leaf_chapters(chapters: list[dict], max_level: int = 3) -> list[dic
     return leaves
 
 
+def _filter_images_for_batch(
+    para_indices: list[int],
+    extracted_images: list[dict],
+) -> dict[str, str]:
+    """筛选段落范围内的图片，返回 filename→path。
+
+    img['path'] 已经是完整路径（image_extractor.py 中构建），无需再拼接。
+    """
+    batch_para_set = set(para_indices)
+    image_map: dict[str, str] = {}
+    for img in extracted_images:
+        near_indices = img.get("near_para_indices")
+        if not near_indices:
+            single = img.get("near_para_index")
+            near_indices = [single] if single is not None else []
+        if any(pi in batch_para_set for pi in near_indices):
+            image_map[img["filename"]] = img["path"]
+    return image_map
+
+
 def review_format_rules(
     rules: list[AnbiaoRule],
     doc_format: DocumentFormat,
