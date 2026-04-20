@@ -87,6 +87,29 @@ def _build_batch_from_node(
     return ChapterBatch(text=text, para_indices=indices, chapter_title=title, image_map=img_map)
 
 
+def _build_fallback_batches(
+    paragraphs: list,
+    image_map: dict[str, str] | None,
+    batch_size: int = 50,
+) -> list[ChapterBatch]:
+    """无章节索引时按段落数分批，chapter_title 为 "段落批次 N"。
+
+    兜底模式不按章节拆分图片，所有批次共享传入的完整 image_map。
+    """
+    batches: list[ChapterBatch] = []
+    for i in range(0, len(paragraphs), batch_size):
+        batch_paras = paragraphs[i:i + batch_size]
+        text = "\n".join(f"[{p.index}] {p.text}" for p in batch_paras)
+        indices = [p.index for p in batch_paras]
+        batches.append(ChapterBatch(
+            text=text,
+            para_indices=indices,
+            chapter_title=f"段落批次 {i // batch_size + 1}",
+            image_map=dict(image_map) if image_map else {},
+        ))
+    return batches
+
+
 def review_format_rules(
     rules: list[AnbiaoRule],
     doc_format: DocumentFormat,

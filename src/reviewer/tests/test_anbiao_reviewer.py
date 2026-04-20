@@ -89,3 +89,24 @@ def test_build_batch_from_node_missing_start_end_uses_all():
     node = {"title": "T", "children": []}
     batch = _build_batch_from_node(node, paras, [], title="T")
     assert batch.para_indices == [0, 1]
+
+
+def test_build_fallback_batches_splits_by_50():
+    from src.reviewer.anbiao_reviewer import _build_fallback_batches
+    paras = _make_paras([f"p{i}" for i in range(120)])
+    batches = _build_fallback_batches(paras, image_map={"img.png": "/tmp/img.png"}, batch_size=50)
+    assert len(batches) == 3
+    assert batches[0].chapter_title == "段落批次 1"
+    assert batches[1].chapter_title == "段落批次 2"
+    assert batches[2].chapter_title == "段落批次 3"
+    assert len(batches[0].para_indices) == 50
+    assert len(batches[2].para_indices) == 20
+    assert batches[0].image_map == {"img.png": "/tmp/img.png"}
+    assert batches[2].image_map == {"img.png": "/tmp/img.png"}
+
+
+def test_build_fallback_batches_none_image_map():
+    from src.reviewer.anbiao_reviewer import _build_fallback_batches
+    paras = _make_paras(["a", "b"])
+    batches = _build_fallback_batches(paras, image_map=None, batch_size=50)
+    assert batches[0].image_map == {}
