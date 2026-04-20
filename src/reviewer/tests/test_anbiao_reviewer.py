@@ -110,3 +110,63 @@ def test_build_fallback_batches_none_image_map():
     paras = _make_paras(["a", "b"])
     batches = _build_fallback_batches(paras, image_map=None, batch_size=50)
     assert batches[0].image_map == {}
+
+
+def test_split_chapter_no_children_returns_whole():
+    from src.reviewer.anbiao_reviewer import _split_chapter_at_sub_sections
+    paras = _make_paras(["p0", "p1"])
+    chapter = {"title": "C", "start_para": 0, "end_para": 1, "children": []}
+    batches = _split_chapter_at_sub_sections(chapter, paras, [], max_chars=10)
+    assert len(batches) == 1
+    assert batches[0].chapter_title == "C"
+
+
+def test_split_chapter_packs_subs_under_max_chars():
+    """三个小子章节合并到一批（总字符 < max_chars）。"""
+    from src.reviewer.anbiao_reviewer import _split_chapter_at_sub_sections
+    paras = _make_paras(["aa", "bb", "cc"])
+    chapter = {
+        "title": "C", "start_para": 0, "end_para": 2,
+        "children": [
+            {"title": "S1", "start_para": 0, "end_para": 0},
+            {"title": "S2", "start_para": 1, "end_para": 1},
+            {"title": "S3", "start_para": 2, "end_para": 2},
+        ],
+    }
+    batches = _split_chapter_at_sub_sections(chapter, paras, [], max_chars=10000)
+    assert len(batches) == 1
+    assert set(batches[0].para_indices) == {0, 1, 2}
+    assert batches[0].chapter_title == "C"
+
+
+def test_split_chapter_breaks_when_accumulated_exceeds_max():
+    """前两个子章节合并后超限 → 先提交前一个，新批次从第二个开始。"""
+    from src.reviewer.anbiao_reviewer import _split_chapter_at_sub_sections
+    long_text = "x" * 60
+    paras = [Paragraph(index=0, text=long_text), Paragraph(index=1, text=long_text)]
+    chapter = {
+        "title": "C", "start_para": 0, "end_para": 1,
+        "children": [
+            {"title": "S1", "start_para": 0, "end_para": 0},
+            {"title": "S2", "start_para": 1, "end_para": 1},
+        ],
+    }
+    batches = _split_chapter_at_sub_sections(chapter, paras, [], max_chars=100)
+    assert len(batches) == 2
+    assert batches[0].para_indices == [0]
+    assert batches[1].para_indices == [1]
+
+
+def test_split_chapter_oversized_single_sub_sends_whole():
+    """单个子章节超 max_chars → 整体发送（不拆分内部）。"""
+    from src.reviewer.anbiao_reviewer import _split_chapter_at_sub_sections
+    huge = "y" * 500
+    paras = [Paragraph(index=0, text=huge)]
+    chapter = {
+        "title": "C", "start_para": 0, "end_para": 0,
+        "children": [{"title": "Huge", "start_para": 0, "end_para": 0}],
+    }
+    batches = _split_chapter_at_sub_sections(chapter, paras, [], max_chars=100)
+    assert len(batches) == 1
+    assert batches[0].para_indices == [0]
+    assert batches[0].chapter_title == "C/Huge"

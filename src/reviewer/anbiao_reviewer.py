@@ -110,6 +110,69 @@ def _build_fallback_batches(
     return batches
 
 
+def _split_chapter_at_sub_sections(
+    chapter: dict,
+    paragraphs: list,
+    extracted_images: list[dict],
+    max_chars: int,
+) -> list[ChapterBatch]:
+    """一级标题超限时在二级子章节边界切分。
+
+    - 无子章节 → 整体作为 1 批
+    - 累积超 max_chars → 提交当前累积，新批次从触发子章节开始
+    - 单个子章节超 max_chars → 单独作为 1 批，title 拼为 "父/子"
+    """
+    from src.reviewer.tender_indexer import paragraphs_to_text
+
+    sub_sections = chapter.get("children", [])
+    if not sub_sections:
+        return [_build_batch_from_node(chapter, paragraphs, extracted_images, chapter["title"])]
+
+    batches: list[ChapterBatch] = []
+    current_text_parts: list[str] = []
+    current_indices: list[int] = []
+
+    def _flush():
+        if not current_text_parts:
+            return
+        text = "\n".join(current_text_parts)
+        img_map = _filter_images_for_batch(current_indices, extracted_images)
+        batches.append(ChapterBatch(
+            text=text,
+            para_indices=list(current_indices),
+            chapter_title=chapter["title"],
+            image_map=img_map,
+        ))
+
+    for sub in sub_sections:
+        start = sub.get("start_para", 0)
+        end = sub.get("end_para", start)
+        paras_in_sub = [p for p in paragraphs if start <= p.index <= end]
+        sub_text = paragraphs_to_text(paras_in_sub)
+        sub_indices = [p.index for p in paras_in_sub]
+        sub_chars = len(sub_text)
+
+        if sub_chars > max_chars:
+            _flush()
+            current_text_parts = []
+            current_indices = []
+            title = chapter["title"] + "/" + sub.get("title", "")
+            batches.append(_build_batch_from_node(sub, paragraphs, extracted_images, title))
+            continue
+
+        combined_len = len("\n".join(current_text_parts + [sub_text]))
+        if combined_len > max_chars:
+            _flush()
+            current_text_parts = [sub_text]
+            current_indices = list(sub_indices)
+        else:
+            current_text_parts.append(sub_text)
+            current_indices.extend(sub_indices)
+
+    _flush()
+    return batches
+
+
 def review_format_rules(
     rules: list[AnbiaoRule],
     doc_format: DocumentFormat,
