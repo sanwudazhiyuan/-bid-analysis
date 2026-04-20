@@ -240,3 +240,28 @@ def test_build_chapter_batches_local_skips_empty_leaves():
         api_settings=api_settings, extracted_images=[], image_map=None,
     )
     assert [b.chapter_title for b in batches] == ["C"]
+
+
+def test_format_chapter_results_includes_candidates_and_summary():
+    from src.reviewer.anbiao_reviewer import _format_chapter_results
+    chapter_results = [
+        {
+            "chapter_title": "技术方案",
+            "candidates": [
+                {"para_index": 3, "text_snippet": "XX公司", "reason": "泄露公司名"},
+            ],
+            "summary": "发现1处泄露",
+        },
+        {"chapter_title": "报价", "candidates": [], "summary": ""},
+    ]
+    text = _format_chapter_results(chapter_results)
+    assert "### 章节：技术方案" in text
+    assert "段落3" in text and "泄露公司名" in text
+    assert "摘要: 发现1处泄露" in text
+    assert "### 章节：报价" in text
+    assert "（无违规内容）" in text
+
+
+def test_format_chapter_results_empty():
+    from src.reviewer.anbiao_reviewer import _format_chapter_results
+    assert _format_chapter_results([]) == ""

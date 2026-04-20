@@ -221,6 +221,25 @@ def _build_chapter_batches(
     return batches
 
 
+def _format_chapter_results(chapter_results: list[dict]) -> str:
+    """将逐章节审核结果格式化为综合判定 prompt 的输入文本。"""
+    lines: list[str] = []
+    for cr in chapter_results:
+        lines.append(f"### 章节：{cr['chapter_title']}")
+        candidates = cr.get("candidates") or []
+        if candidates:
+            for c in candidates:
+                if isinstance(c, dict):
+                    lines.append(f"- 段落{c.get('para_index', '?')}: {c.get('reason', '')}")
+        else:
+            lines.append("（无违规内容）")
+        summary = cr.get("summary", "")
+        if summary:
+            lines.append(f"摘要: {summary}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def review_format_rules(
     rules: list[AnbiaoRule],
     doc_format: DocumentFormat,
