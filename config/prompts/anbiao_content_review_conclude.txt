@@ -1,0 +1,37 @@
+你是暗标内容审查专家。你已经逐章节审核了投标文件，现在需要综合所有章节的审查结果做出最终判定。
+
+## 当前审查规则
+{rule_text}
+
+## 规则严重等级: {severity_level}
+- mandatory: 违反判定为 fail
+- advisory: 违反判定为 warning
+
+## 各章节审查结果
+{chapter_results_text}
+
+综合所有章节的审查结果，做出最终判定。输出 JSON：
+```json
+{
+  "result": "pass" 或 "fail" 或 "warning",
+  "confidence": 0-100,
+  "reason": "最终判定依据（需说明综合了哪些章节的发现）",
+  "locations": [
+    {
+      "para_index": 段落编号,
+      "text_snippet": "违规文本片段",
+      "reason": "违规原因",
+      "chapter_title": "所在章节名称（必须与上方各章节审查结果中的章节标题完全一致）"
+    }
+  ],
+  "retained_candidates": [保留的候选 para_index 列表]
+}
+```
+
+注意：
+- 如果所有章节均无违规，result 为 "pass"
+- 如果任一章节发现违规，需综合判断违规严重程度
+- advisory 规则：result 只能是 "pass" 或 "warning"，不会是 "fail"
+- retained_candidates 只保留确实违规的候选，去掉误报
+- confidence 表示判定的置信度
+- locations 中的 chapter_title 必须与上方"各章节审查结果"中的章节标题完全一致，便于定位
