@@ -173,6 +173,54 @@ def _split_chapter_at_sub_sections(
     return batches
 
 
+def _build_chapter_batches(
+    paragraphs: list,
+    tender_index: dict,
+    is_local_mode: bool,
+    api_settings: dict,
+    extracted_images: list[dict],
+    image_map: dict[str, str] | None,
+) -> list[ChapterBatch]:
+    """总编排：根据模式与章节结构产出 ChapterBatch 列表。
+
+    - 无 chapters → _build_fallback_batches
+    - 本地模式 → 叶子节点（≤level 3）逐一成批，超限时 _split_chapter_at_sub_sections
+    - 云端模式 → 一级标题整章成批（max_chars 取 2×），超限时 _split_chapter_at_sub_sections
+    """
+    from src.reviewer.tender_indexer import get_max_chars_per_batch, paragraphs_to_text
+
+    chapters = tender_index.get("chapters", [])
+    if not chapters:
+        return _build_fallback_batches(paragraphs, image_map, batch_size=50)
+
+    base_max = get_max_chars_per_batch(api_settings)
+    max_chars = base_max if is_local_mode else base_max * 2
+
+    if is_local_mode:
+        nodes = _collect_leaf_chapters(chapters, max_level=3)
+    else:
+        nodes = chapters
+
+    batches: list[ChapterBatch] = []
+    for node in nodes:
+        start = node.get("start_para", 0)
+        end = node.get("end_para", -1)
+        paras_in_node = [p for p in paragraphs if start <= p.index <= end]
+        if not paras_in_node:
+            continue
+
+        node_text = paragraphs_to_text(paras_in_node)
+        if len(node_text) <= max_chars:
+            batches.append(_build_batch_from_node(node, paragraphs, extracted_images, node["title"]))
+        else:
+            batches.extend(_split_chapter_at_sub_sections(node, paragraphs, extracted_images, max_chars))
+
+    if not batches:
+        return _build_fallback_batches(paragraphs, image_map, batch_size=50)
+
+    return batches
+
+
 def review_format_rules(
     rules: list[AnbiaoRule],
     doc_format: DocumentFormat,

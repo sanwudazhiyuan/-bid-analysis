@@ -170,3 +170,73 @@ def test_split_chapter_oversized_single_sub_sends_whole():
     assert len(batches) == 1
     assert batches[0].para_indices == [0]
     assert batches[0].chapter_title == "C/Huge"
+
+
+def test_build_chapter_batches_no_chapters_fallback():
+    """无 chapters → 走兜底，chapter_title 为 "段落批次 N"。"""
+    from src.reviewer.anbiao_reviewer import _build_chapter_batches
+    paras = _make_paras([f"p{i}" for i in range(60)])
+    tender_index = {"chapters": []}
+    api_settings = {"api": {"context_length": 32000, "max_output_tokens": 8000}}
+    batches = _build_chapter_batches(
+        paras, tender_index, is_local_mode=False,
+        api_settings=api_settings, extracted_images=[],
+        image_map={"k.png": "/tmp/k.png"},
+    )
+    assert len(batches) == 2
+    assert batches[0].chapter_title.startswith("段落批次")
+    assert batches[0].image_map == {"k.png": "/tmp/k.png"}
+
+
+def test_build_chapter_batches_local_mode_uses_leaves():
+    """本地模式：每个叶子节点一批。"""
+    from src.reviewer.anbiao_reviewer import _build_chapter_batches
+    paras = _make_paras(["p0", "p1", "p2", "p3"])
+    tender_index = {"chapters": [
+        {"title": "C1", "level": 1, "start_para": 0, "end_para": 3, "children": [
+            {"title": "C1.1", "level": 2, "start_para": 0, "end_para": 1, "children": []},
+            {"title": "C1.2", "level": 2, "start_para": 2, "end_para": 3, "children": []},
+        ]},
+    ]}
+    api_settings = {"api": {"context_length": 16000, "max_output_tokens": 4000}}
+    batches = _build_chapter_batches(
+        paras, tender_index, is_local_mode=True,
+        api_settings=api_settings, extracted_images=[], image_map=None,
+    )
+    assert [b.chapter_title for b in batches] == ["C1.1", "C1.2"]
+    assert batches[0].para_indices == [0, 1]
+    assert batches[1].para_indices == [2, 3]
+
+
+def test_build_chapter_batches_cloud_mode_one_batch_per_l1():
+    """云端模式：未超限时每个一级标题一批（含所有子章节）。"""
+    from src.reviewer.anbiao_reviewer import _build_chapter_batches
+    paras = _make_paras(["a", "b", "c", "d"])
+    tender_index = {"chapters": [
+        {"title": "C1", "level": 1, "start_para": 0, "end_para": 1, "children": [
+            {"title": "C1.1", "level": 2, "start_para": 0, "end_para": 1, "children": []},
+        ]},
+        {"title": "C2", "level": 1, "start_para": 2, "end_para": 3, "children": []},
+    ]}
+    api_settings = {"api": {"context_length": 200000, "max_output_tokens": 4000}}
+    batches = _build_chapter_batches(
+        paras, tender_index, is_local_mode=False,
+        api_settings=api_settings, extracted_images=[], image_map=None,
+    )
+    assert [b.chapter_title for b in batches] == ["C1", "C2"]
+
+
+def test_build_chapter_batches_local_skips_empty_leaves():
+    """start_para > end_para 或无段落命中的叶子不产出批次。"""
+    from src.reviewer.anbiao_reviewer import _build_chapter_batches
+    paras = _make_paras(["p0"])
+    tender_index = {"chapters": [
+        {"title": "Empty", "level": 1, "start_para": 5, "end_para": 10, "children": []},
+        {"title": "C", "level": 1, "start_para": 0, "end_para": 0, "children": []},
+    ]}
+    api_settings = {"api": {"context_length": 16000, "max_output_tokens": 4000}}
+    batches = _build_chapter_batches(
+        paras, tender_index, is_local_mode=True,
+        api_settings=api_settings, extracted_images=[], image_map=None,
+    )
+    assert [b.chapter_title for b in batches] == ["C"]
