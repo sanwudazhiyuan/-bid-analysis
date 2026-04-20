@@ -70,6 +70,23 @@ def _filter_images_for_batch(
     return image_map
 
 
+def _build_batch_from_node(
+    node: dict,
+    paragraphs: list,
+    extracted_images: list[dict],
+    title: str,
+) -> ChapterBatch:
+    """从章节节点构建 ChapterBatch（用于叶子节点整体发送 + 云端超限子章节拆分）。"""
+    from src.reviewer.tender_indexer import paragraphs_to_text
+    start = node.get("start_para", 0)
+    end = node.get("end_para", len(paragraphs) - 1 if paragraphs else 0)
+    paras = [p for p in paragraphs if start <= p.index <= end]
+    text = paragraphs_to_text(paras)
+    indices = [p.index for p in paras]
+    img_map = _filter_images_for_batch(indices, extracted_images)
+    return ChapterBatch(text=text, para_indices=indices, chapter_title=title, image_map=img_map)
+
+
 def review_format_rules(
     rules: list[AnbiaoRule],
     doc_format: DocumentFormat,

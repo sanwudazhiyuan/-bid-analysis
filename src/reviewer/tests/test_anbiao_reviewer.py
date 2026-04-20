@@ -68,3 +68,24 @@ def test_filter_images_for_batch_skips_images_with_no_indices():
     from src.reviewer.anbiao_reviewer import _filter_images_for_batch
     images = [{"filename": "d.png", "path": "/tmp/d.png"}]
     assert _filter_images_for_batch([0, 1, 2], images) == {}
+
+
+def test_build_batch_from_node_basic():
+    from src.reviewer.anbiao_reviewer import _build_batch_from_node
+    paras = _make_paras(["p0", "p1", "p2", "p3"])
+    node = {"title": "T", "start_para": 1, "end_para": 2, "children": []}
+    images = [{"filename": "x.png", "path": "/tmp/x.png", "near_para_indices": [2]}]
+    batch = _build_batch_from_node(node, paras, images, title="章节T")
+    assert batch.para_indices == [1, 2]
+    assert "[1] p1" in batch.text and "[2] p2" in batch.text
+    assert batch.chapter_title == "章节T"
+    assert batch.image_map == {"x.png": "/tmp/x.png"}
+
+
+def test_build_batch_from_node_missing_start_end_uses_all():
+    """节点无 start_para/end_para 字段时，fallback 为全量段落。"""
+    from src.reviewer.anbiao_reviewer import _build_batch_from_node
+    paras = _make_paras(["a", "b"])
+    node = {"title": "T", "children": []}
+    batch = _build_batch_from_node(node, paras, [], title="T")
+    assert batch.para_indices == [0, 1]
