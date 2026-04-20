@@ -265,3 +265,158 @@ def test_format_chapter_results_includes_candidates_and_summary():
 def test_format_chapter_results_empty():
     from src.reviewer.anbiao_reviewer import _format_chapter_results
     assert _format_chapter_results([]) == ""
+
+
+# ========== 集成测试：review_content_rules 主流程 ==========
+
+from src.models import DocumentFormat
+from src.reviewer.anbiao_rule_parser import AnbiaoRule
+
+
+def _make_rule(idx=1, text="不得出现公司名称", is_mandatory=True):
+    return AnbiaoRule(
+        rule_index=idx,
+        rule_text=text,
+        rule_type="content",
+        is_mandatory=is_mandatory,
+    )
+
+
+def _empty_doc_format():
+    return DocumentFormat(sections=[])
+
+
+def test_review_content_rules_multi_chapter_conclude(monkeypatch):
+    """多章节：每章节审核 + 1 次综合判定；总调用次数 = 章节数 + 1。"""
+    from src.reviewer import anbiao_reviewer as mod
+
+    paras = _make_paras(["p0", "p1", "p2", "p3"])
+    tender_index = {"chapters": [
+        {"title": "C1", "level": 1, "start_para": 0, "end_para": 1, "children": []},
+        {"title": "C2", "level": 1, "start_para": 2, "end_para": 3, "children": []},
+    ]}
+    rule = _make_rule()
+
+    call_log = []
+
+    def fake_call_qwen(messages, api_settings):
+        call_log.append(messages)
+        call_idx = len(call_log)
+        if call_idx <= 2:
+            if call_idx == 1:
+                return {"candidates": [{"para_index": 0, "text_snippet": "X公司", "reason": "公司名"}], "summary": "1处违规"}
+            return {"candidates": [], "summary": ""}
+        return {
+            "result": "fail",
+            "confidence": 90,
+            "reason": "C1 段落 0 泄露公司名",
+            "locations": [{"para_index": 0, "text_snippet": "X公司", "reason": "公司名", "chapter_title": "C1"}],
+            "retained_candidates": [0],
+        }
+
+    monkeypatch.setattr(mod, "call_qwen", fake_call_qwen)
+
+    results = mod.review_content_rules(
+        rules=[rule],
+        paragraphs=paras,
+        tender_index=tender_index,
+        extracted_images=[],
+        doc_format=_empty_doc_format(),
+        api_settings={"api": {"context_length": 32000, "max_output_tokens": 8000}},
+        is_local_mode=True,
+    )
+    assert len(call_log) == 3
+    assert len(results) == 1
+    assert results[0]["result"] == "fail"
+    assert results[0]["tender_locations"]
+
+
+def test_review_content_rules_advisory_downgrade(monkeypatch):
+    """advisory 规则：综合判定返回 fail 自动降级为 warning。"""
+    from src.reviewer import anbiao_reviewer as mod
+
+    paras = _make_paras(["p0", "p1"])
+    tender_index = {"chapters": [
+        {"title": "C1", "level": 1, "start_para": 0, "end_para": 1, "children": []},
+    ]}
+    rule = _make_rule(idx=2, text="不应附图", is_mandatory=False)
+
+    call_counter = {"n": 0}
+
+    def fake_call_qwen(messages, api_settings):
+        call_counter["n"] += 1
+        if call_counter["n"] == 1:
+            return {"candidates": [], "summary": ""}
+        return {"result": "fail", "confidence": 70, "reason": "有图", "locations": [], "retained_candidates": []}
+
+    monkeypatch.setattr(mod, "call_qwen", fake_call_qwen)
+
+    results = mod.review_content_rules(
+        rules=[rule],
+        paragraphs=paras,
+        tender_index=tender_index,
+        extracted_images=[],
+        doc_format=_empty_doc_format(),
+        api_settings={"api": {"context_length": 32000, "max_output_tokens": 8000}},
+        is_local_mode=True,
+    )
+    assert results[0]["result"] == "warning"
+
+
+def test_review_content_rules_conclude_llm_failure_fallback(monkeypatch):
+    """综合判定 LLM 失败 + 有候选 → 降级为 fail，置信度 60。"""
+    from src.reviewer import anbiao_reviewer as mod
+
+    paras = _make_paras(["p0"])
+    tender_index = {"chapters": [
+        {"title": "C1", "level": 1, "start_para": 0, "end_para": 0, "children": []},
+    ]}
+    rule = _make_rule()
+
+    call_counter = {"n": 0}
+
+    def fake_call_qwen(messages, api_settings):
+        call_counter["n"] += 1
+        if call_counter["n"] == 1:
+            return {"candidates": [{"para_index": 0, "text_snippet": "X", "reason": "r"}], "summary": ""}
+        return None
+
+    monkeypatch.setattr(mod, "call_qwen", fake_call_qwen)
+
+    results = mod.review_content_rules(
+        rules=[rule], paragraphs=paras, tender_index=tender_index,
+        extracted_images=[], doc_format=_empty_doc_format(),
+        api_settings={"api": {"context_length": 32000, "max_output_tokens": 8000}},
+        is_local_mode=True,
+    )
+    assert results[0]["result"] == "fail"
+    assert results[0]["confidence"] == 60
+    assert "综合判定 LLM 调用失败" in results[0]["reason"]
+
+
+def test_review_content_rules_no_chapters_fallback(monkeypatch):
+    """无章节索引时走兜底分批。"""
+    from src.reviewer import anbiao_reviewer as mod
+
+    paras = _make_paras([f"p{i}" for i in range(10)])
+    tender_index = {"chapters": []}
+    rule = _make_rule()
+
+    call_log = []
+
+    def fake_call_qwen(messages, api_settings):
+        call_log.append(1)
+        if len(call_log) == 2:
+            return {"result": "pass", "confidence": 90, "reason": "无", "locations": [], "retained_candidates": []}
+        return {"candidates": [], "summary": ""}
+
+    monkeypatch.setattr(mod, "call_qwen", fake_call_qwen)
+
+    results = mod.review_content_rules(
+        rules=[rule], paragraphs=paras, tender_index=tender_index,
+        extracted_images=[], doc_format=_empty_doc_format(),
+        api_settings={"api": {"context_length": 32000, "max_output_tokens": 8000}},
+        is_local_mode=False,
+    )
+    assert len(call_log) == 2
+    assert results[0]["result"] == "pass"
