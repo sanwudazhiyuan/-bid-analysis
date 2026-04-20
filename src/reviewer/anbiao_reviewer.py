@@ -28,7 +28,6 @@ class ChapterBatch:
 
 _FORMAT_PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" / "anbiao_format_review.txt"
 _CONTENT_PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" / "anbiao_content_review.txt"
-_CONTENT_FINAL_PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" / "anbiao_content_review_final.txt"
 _CONTENT_CONCLUDE_PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" / "anbiao_content_review_conclude.txt"
 
 
