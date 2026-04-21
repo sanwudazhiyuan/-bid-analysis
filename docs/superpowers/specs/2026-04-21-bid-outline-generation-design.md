@@ -31,45 +31,77 @@
 
 ## 方案总览
 
-四层流水线：
+四层流水线，**所有招标文件均走完整流程**：
 
 ```
 招标原文 tagged_paragraphs
     │
-    ▼
-Layer 1 · 短路判定（沿用现有 bid_format.txt 逻辑）
-    │   招标文件直接给出完整格式样例？
-    ├── 是 ──▶ 直接按样例构建 docx（产物同现状）
-    │
-    └── 否
-    ▼
-Layer 2 · 骨架信号抽取（新增，独立全文扫描）
-    │   关键词 + 向量过滤 → 按段落数分批 → LLM 抽 5 类结构信号
-    ▼
-Layer 3 · 目录合成（新增，单次 LLM 调用）
-    │   仅输入 Layer 2 JSON，合成多级目录树
-    ▼
+    ├──────────────┬──────────────┐
+    ▼              ▼
+Layer 1          Layer 2
+格式样例抽取      骨架信号抽取（全文扫描）
+（沿用现有        关键词 + 向量过滤 →
+ bid_format.txt） 按段落数分批 →
+                 LLM 抽 5 类结构信号
+    │              │
+    └──────┬───────┘
+           ▼
+Layer 3 · 目录合成（单次 LLM 调用）
+    输入：Layer 1 格式样例 + Layer 2 结构信号
+    输出：多级目录树 JSON（节点携带样例内容引用）
+           │
+           ▼
 Layer 4 · docx 渲染（纯渲染，无 LLM）
-    │   目录树 → 三级标题 + 空段落 + 动态节点红字提示
-    ▼
+    目录树 → 三级标题 + 空段落 +
+    has_sample 节点嵌入 Layer 1 样例 +
+    dynamic 节点红字提示
+           │
+           ▼
 交付：投标文件大纲.docx
 ```
 
 设计原则：
 
-1. **Layer 2 独立自足**，不依赖 a~g / checklist 的下游聚合结果，避免粒度错配
-2. **两次 LLM 调用分工明确**：Layer 2 只做信号抽取，Layer 3 只做结构合成
-3. **中间 JSON 为单一数据契约**：Layer 2 JSON → Layer 3 JSON，均结构化可调试
-4. **顶层顺序完全数据驱动**，不使用固定章节名模板
+1. **Layer 1 与 Layer 2 并行协作**，不是互斥分支：Layer 1 抽"招标方给了哪些样例、样例内容是什么"，Layer 2 抽"招标方规定投标书有哪些章节/条目"。两者合起来才能构建完整目录
+2. **Layer 2 独立自足**，不依赖 a~g / checklist 的下游聚合结果，避免粒度错配
+3. **两次 LLM 调用分工明确**：Layer 1/2 做抽取，Layer 3 做结构合成
+4. **中间 JSON 为单一数据契约**：Layer 1 JSON + Layer 2 JSON → Layer 3 JSON，均结构化可调试
+5. **顶层顺序完全数据驱动**，不使用固定章节名模板
 
-## Layer 1 · 短路判定
+## Layer 1 · 格式样例抽取
 
-复用现有 [bid_format.py](../../../src/extractor/bid_format.py) 的第一次 LLM 调用逻辑和 [config/prompts/bid_format.txt](../../../config/prompts/bid_format.txt) 提示词。判定招标文件是否包含完整格式样例：
+复用现有 [bid_format.py](../../../src/extractor/bid_format.py) 的第一次 LLM 调用逻辑和 [config/prompts/bid_format.txt](../../../config/prompts/bid_format.txt) 提示词。职责：把招标文件里直接给出的格式样例（投标函模板、报价表格式、授权委托书格式等）抽出来。
 
-- 有样例：按原有逻辑构建 docx 并返回，不进入后续 Layer
-- 无样例 / `has_template: false`：进入 Layer 2
+### 输出
 
-短路路径的产物在文件开头加一行说明："本大纲基于招标文件直接提供的格式样例构建"，与 Layer 4 路径的交付文件名保持一致（均为"投标文件大纲.docx"）。
+```json
+{
+  "has_any_template": true,
+  "templates": [
+    {
+      "title": "投标函",
+      "type": "text",
+      "content": "致：[采购人名称]\n我方响应贵方...[投标函全文模板]"
+    },
+    {
+      "title": "开标一览表",
+      "type": "standard_table",
+      "columns": ["项目名称", "投标报价（万元）", "服务期限", "备注"],
+      "rows": [["[待填写]", "[待填写]", "[待填写]", ""]]
+    }
+  ]
+}
+```
+
+- `has_any_template: false` 时 `templates` 为空数组
+- `title` 将作为 Layer 3 目录节点匹配的锚点
+- 多模板按招标文件中出现顺序保留
+
+### 与 Layer 2 的关系
+
+- 并行执行，都从 `tagged_paragraphs` 输入（可并发调用 LLM 以减少总耗时）
+- Layer 1 只关心"样例是否存在及样例内容"，不关心章节结构
+- Layer 2 的 `format_templates` 字段仍保留，用于兜底识别"招标方提到了但 Layer 1 没成功抽出样例"的模板（Layer 3 合成时以 Layer 1 实际抽出的样例为权威来源）
 
 ## Layer 2 · 骨架信号抽取
 
@@ -158,7 +190,9 @@ Layer 4 · docx 渲染（纯渲染，无 LLM）
 
 ### 职责
 
-单次 LLM 调用，仅输入 Layer 2 JSON，输出多级目录树 JSON。
+单次 LLM 调用，输入 Layer 1 + Layer 2 的合并 JSON，输出多级目录树 JSON。
+
+Layer 1 的样例内容不直接塞进 prompt（避免占用 token），而是传入样例的 `title` 列表即可；目录树中 `has_sample=true` 的节点由代码后处理把 Layer 1 抽出的样例内容绑定到节点上，Layer 4 渲染时直接嵌入。
 
 ### 输出 schema
 
@@ -204,14 +238,18 @@ Layer 4 · docx 渲染（纯渲染，无 LLM）
 
 ### Prompt 指令核心原则
 
-新建 [config/prompts/bid_format_compose.txt](../../../config/prompts/bid_format_compose.txt)，要求：
+新建 [config/prompts/bid_format_compose.txt](../../../config/prompts/bid_format_compose.txt)，输入包含 Layer 1 的 `templates` title 列表 + Layer 2 完整 JSON，要求：
 
 1. **顶层顺序优先级**：`composition_clause.items` 存在时按其顺序；若缺失，按"格式样表类 → 评审得分类（商务/技术）→ 补充材料类"的结构性原则拼接，不使用固定章节名
 2. **技术/商务部分二级目录**：从 `scoring_factors` 对应 `category` 的因素逐条生成
 3. **资料枚举挂接**：`material_enumerations.parent` 作为挂接锚点匹配上级节点；匹配不到时作为所属顶层章节的新子节点
-4. **格式样表独立成节**：`format_templates` 每一条都独立成节，不被其它信号吞并
+4. **格式样表独立成节**：Layer 1 `templates` 每一条都独立成节、标记 `has_sample=true`；Layer 2 `format_templates` 中 Layer 1 未覆盖的条目也独立成节但 `has_sample=false`
 5. **动态节点标记**：`dynamic_nodes.anchor` 匹配到对应节点后打 `dynamic=true` + `dynamic_hint`
 6. **保留重复**：同一条目若由多个信号或多个章节要求，按位置各自出现，不做去重
+
+### 样例内容绑定（代码后处理）
+
+LLM 输出的目录树中 `has_sample=true` 节点由代码按 `title` 从 Layer 1 `templates` 数组查找对应样例内容，绑定到节点的 `sample_content` 字段，供 Layer 4 渲染使用。
 
 ### 编号后处理
 
@@ -229,7 +267,7 @@ Layer 4 · docx 渲染（纯渲染，无 LLM）
 - Level 2 → Word `Heading 2`，前缀"1.1"
 - Level 3 → Word `Heading 3`，前缀"1.1.1"
 - 每个叶子节点下留一个空段落作为正文填写空间
-- `has_sample=true` 的节点：节点正文位置嵌入 Layer 1 逻辑抽取出的样表/模板文本
+- `has_sample=true` 的节点：节点正文位置嵌入 Layer 1 抽取并由 Layer 3 后处理绑定的 `sample_content`（文本原样渲染，`standard_table` 类型渲染为 Word 表格）
 - `has_sample=false` 或非 format 来源节点：仅标题 + 空段落
 
 ### 动态节点提示
