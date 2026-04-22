@@ -288,3 +288,71 @@ def _assign_sub(parent: dict, prefix: str) -> None:
     for j, child in enumerate(parent.get("children") or [], start=1):
         child["number"] = f"{prefix}.{j}"
         _assign_sub(child, prefix=f"{prefix}.{j}")
+
+
+# ========== Layer 4：docx 渲染 ==========
+
+from docx import Document as _DocxDocument  # noqa: E402
+from docx.shared import RGBColor as _RGBColor  # noqa: E402
+
+
+def _render_docx(tree: dict, output) -> None:
+    """把目录树渲染为 docx。
+
+    output: 路径（str/Path）或可写 file-like 对象。
+    """
+    doc = _DocxDocument()
+    doc.add_heading(tree.get("title", "投标文件"), level=0)
+    for node in tree.get("nodes") or []:
+        _render_node(doc, node)
+    doc.save(output)
+
+
+def _render_node(doc, node: dict) -> None:
+    level = min(max(int(node.get("level", 1) or 1), 1), 3)
+    number = node.get("number", "")
+    title = node.get("title", "")
+    heading_text = f"{number} {title}".strip()
+    doc.add_heading(heading_text, level=level)
+
+    # 动态节点提示：红字 + 斜体
+    if node.get("dynamic"):
+        hint = node.get("dynamic_hint") or "按实际情况展开"
+        sample_n1 = f'"{number}.1 示例一"' if number else '"示例一"'
+        sample_n2 = f'"{number}.2 示例二"' if number else '"示例二"'
+        line = f"[⚠ 此节需{hint}，例如 {sample_n1} / {sample_n2}]"
+        p = doc.add_paragraph()
+        run = p.add_run(line)
+        run.italic = True
+        run.font.color.rgb = _RGBColor(0xFF, 0x00, 0x00)
+
+    # 样例嵌入
+    sc = node.get("sample_content")
+    if node.get("has_sample") and isinstance(sc, dict):
+        if sc.get("type") == "standard_table":
+            _add_table(doc, sc.get("columns") or [], sc.get("rows") or [])
+        else:
+            content = sc.get("content") or ""
+            for line in content.split("\n"):
+                doc.add_paragraph(line)
+
+    children = node.get("children") or []
+    if not children:
+        doc.add_paragraph("")
+    else:
+        for child in children:
+            _render_node(doc, child)
+
+
+def _add_table(doc, columns: list, rows: list) -> None:
+    if not columns:
+        return
+    ncols = len(columns)
+    tbl = doc.add_table(rows=1 + len(rows), cols=ncols)
+    tbl.style = "Table Grid"
+    for i, c in enumerate(columns):
+        tbl.rows[0].cells[i].text = str(c)
+    for ri, row in enumerate(rows, start=1):
+        padded = list(row) + [""] * (ncols - len(row))
+        for ci, cell in enumerate(padded[:ncols]):
+            tbl.rows[ri].cells[ci].text = str(cell)

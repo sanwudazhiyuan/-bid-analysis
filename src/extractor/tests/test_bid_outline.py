@@ -1,5 +1,9 @@
 """测试 bid_outline 四层流水线：合并/合成/绑定/编号/渲染/主入口。"""
+import io
 from unittest.mock import patch
+
+from docx import Document
+from docx.shared import RGBColor
 
 from src.extractor.bid_outline import (
     _merge_skeleton_batches,
@@ -9,6 +13,7 @@ from src.extractor.bid_outline import (
     _edit_distance_le2,
     _assign_numbering,
     _cn_numeral,
+    _render_docx,
 )
 
 
@@ -308,3 +313,106 @@ def test_assign_numbering_overflow_level1():
     _assign_numbering(tree)
     assert tree["nodes"][19]["number"] == "二十、"
     assert tree["nodes"][20]["number"] == "21、"
+
+
+# ========== Layer 4 渲染 ==========
+
+def _build_rendered(tree: dict) -> Document:
+    buf = io.BytesIO()
+    _render_docx(tree, buf)
+    buf.seek(0)
+    return Document(buf)
+
+
+def test_render_docx_writes_hierarchy_with_numbers():
+    tree = {"title": "投标文件", "nodes": [
+        {"number": "一、", "title": "附件", "level": 1,
+         "has_sample": False, "dynamic": False, "children": [
+             {"number": "1.1", "title": "资质", "level": 2,
+              "has_sample": False, "dynamic": False, "children": [
+                  {"number": "1.1.1", "title": "A证书", "level": 3,
+                   "has_sample": False, "dynamic": False, "children": []}
+              ]}
+         ]}
+    ]}
+    doc = _build_rendered(tree)
+    texts = [p.text for p in doc.paragraphs]
+    assert "一、 附件" in texts
+    assert "1.1 资质" in texts
+    assert "1.1.1 A证书" in texts
+
+
+def test_render_docx_embeds_text_sample():
+    tree = {"title": "投标文件", "nodes": [
+        {"number": "一、", "title": "投标函", "level": 1,
+         "has_sample": True, "dynamic": False,
+         "sample_content": {"type": "text",
+                            "content": "致：[采购人]\n我方..."},
+         "children": []}
+    ]}
+    doc = _build_rendered(tree)
+    combined = "\n".join(p.text for p in doc.paragraphs)
+    assert "致：[采购人]" in combined
+    assert "我方..." in combined
+
+
+def test_render_docx_embeds_table_sample():
+    tree = {"title": "投标文件", "nodes": [
+        {"number": "一、", "title": "开标一览表", "level": 1,
+         "has_sample": True, "dynamic": False,
+         "sample_content": {
+             "type": "standard_table",
+             "columns": ["项目", "金额"],
+             "rows": [["A", "100"]],
+         },
+         "children": []}
+    ]}
+    doc = _build_rendered(tree)
+    assert len(doc.tables) == 1
+    tbl = doc.tables[0]
+    assert tbl.rows[0].cells[0].text == "项目"
+    assert tbl.rows[1].cells[1].text == "100"
+
+
+def test_render_docx_dynamic_node_inserts_red_italic_hint():
+    tree = {"title": "投标文件", "nodes": [
+        {"number": "九、", "title": "类似项目业绩一览表", "level": 1,
+         "has_sample": False, "dynamic": True,
+         "dynamic_hint": "按客户/项目逐项展开",
+         "children": []}
+    ]}
+    doc = _build_rendered(tree)
+    hint_paras = [p for p in doc.paragraphs if "⚠" in p.text]
+    assert len(hint_paras) == 1
+    assert "按客户/项目逐项展开" in hint_paras[0].text
+    run = hint_paras[0].runs[0]
+    assert run.italic is True
+    assert run.font.color.rgb == RGBColor(0xFF, 0x00, 0x00)
+
+
+def test_render_docx_dynamic_without_hint_falls_back():
+    """dynamic=True 但无 dynamic_hint 时应有默认提示。"""
+    tree = {"title": "投标文件", "nodes": [
+        {"number": "一、", "title": "X", "level": 1,
+         "has_sample": False, "dynamic": True, "children": []}
+    ]}
+    doc = _build_rendered(tree)
+    hint_paras = [p for p in doc.paragraphs if "⚠" in p.text]
+    assert len(hint_paras) == 1
+
+
+def test_render_docx_accepts_file_path(tmp_path):
+    tree = {"title": "投标文件", "nodes": [
+        {"number": "一、", "title": "X", "level": 1,
+         "has_sample": False, "dynamic": False, "children": []}
+    ]}
+    out = tmp_path / "o.docx"
+    _render_docx(tree, str(out))
+    assert out.exists() and out.stat().st_size > 0
+
+
+def test_render_docx_empty_nodes_writes_only_title():
+    tree = {"title": "投标文件", "nodes": []}
+    doc = _build_rendered(tree)
+    texts = [p.text for p in doc.paragraphs]
+    assert "投标文件" in texts
