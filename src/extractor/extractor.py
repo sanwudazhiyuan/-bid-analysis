@@ -75,7 +75,6 @@ def extract_single_module(
     settings: dict | None = None,
     embeddings_map: dict[int, list[float]] | None = None,
     module_embeddings: dict[str, list[float]] | None = None,
-    modules_context: dict | None = None,
 ) -> dict | None:
     """提取单个模块，供 Web Celery Worker 调用。"""
     if module_key not in _MODULE_REGISTRY:
