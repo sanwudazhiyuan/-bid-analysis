@@ -1266,20 +1266,19 @@
 1. `ThreadPoolExecutor(max_workers=2)` 并行调度 Layer 1（复用现有 `bid_format._first_pass`）和 Layer 2（`_extract_skeleton_signals`）
 2. Layer 1 异常 → warn 并视作 `has_any_template=False`
 3. Layer 2 异常或返回 None → 整体返回 None
-4. 三重空信号（Layer 1 templates=[] ∧ composition_clause.found=False ∧ scoring_factors=[] ∧ material_enumerations=[]）→ 整体返回 None，log error
+4. 三重空信号（Layer 1 templates=[] ∧ composition_clause.found=False ∧ scoring_factors=[] ∧ material_enumerations=[] ∧ format_templates=[]）→ 整体返回 None，log error
 5. Layer 3 合成 → 失败返回 None
-6. 绑定样例 → 编号 → 渲染 docx 到 `settings["output_dir"]/投标文件大纲.docx`（路径约定同现有 extractor）
-7. 返回 `{"title": ..., "nodes": [...], "docx_path": "..."}`
+6. 绑定样例 → 编号 → 返回目录树 JSON（含 `title`/`nodes`/每节点 `number` 与可能的 `sample_content`）
+7. **docx 落盘不在本函数内完成**：与现有 extractor 一样只返回结构化数据，docx 渲染由上游（`server/app/tasks/`）在需要落盘时调用 `_render_docx(tree, path_or_io)`。这样保持模块职责单一，也方便测试
 
-- [ ] **Step 1: 确认 docx 输出路径约定**
+- [ ] **Step 1: 确认现有 extractor 是否自己落盘（预期：否）**
 
-  Grep 一下现有 extractor 是不是用 `settings` 里的路径写文件：
+  快速 grep 确认：
 
   ```bash
-  grep -rn "docx\|output_path" src/extractor/*.py | head -30
+  grep -rn "doc.save\|Document()" src/extractor/*.py
   ```
-
-  **若现有 extractor 不负责落盘**（docx 渲染是由上层 `server/app/tasks/` 负责调用），则本函数的责任简化为：只返回目录树 JSON，docx 渲染由上层调用方选择时机触发。下一步的实现会根据实际情况二选一。
+  Expected: 只有本 task 新加入的 `_render_docx` 里有 `doc.save`；主入口函数无 `save` 调用，与 `extract_checklist` 等其它 extractor 一致。
 
 - [ ] **Step 2: 写失败测试**
 
