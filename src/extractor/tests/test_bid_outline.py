@@ -14,7 +14,11 @@ from src.extractor.bid_outline import (
     _assign_numbering,
     _cn_numeral,
     _render_docx,
+    _is_triple_empty,
+    _layer1_sections_to_templates,
+    extract_bid_outline,
 )
+from src.models import TaggedParagraph
 
 
 # ========== Layer 2 合并 ==========
@@ -416,3 +420,162 @@ def test_render_docx_empty_nodes_writes_only_title():
     doc = _build_rendered(tree)
     texts = [p.text for p in doc.paragraphs]
     assert "投标文件" in texts
+
+
+# ========== 辅助函数 ==========
+
+def test_layer1_sections_to_templates_flattens_groups():
+    """group 类 section 的 children 要被展平为平级 templates。"""
+    sections = [
+        {"title": "投标函", "type": "text", "content": "T"},
+        {"title": "报价文件", "type": "group", "children": [
+            {"title": "开标一览表", "type": "standard_table",
+             "columns": ["A"], "rows": [["1"]]},
+            {"title": "分项报价表", "type": "standard_table",
+             "columns": ["B"], "rows": []},
+        ]},
+    ]
+    out = _layer1_sections_to_templates(sections)
+    titles = [t["title"] for t in out]
+    assert titles == ["投标函", "开标一览表", "分项报价表"]
+    assert out[0]["type"] == "text"
+    assert out[1]["type"] == "standard_table"
+    assert out[1]["columns"] == ["A"]
+
+
+def test_layer1_sections_to_templates_handles_empty():
+    assert _layer1_sections_to_templates([]) == []
+    assert _layer1_sections_to_templates(None) == []
+
+
+def test_is_triple_empty_all_empty_returns_true():
+    layer1 = {"has_any_template": False, "templates": []}
+    layer2 = {
+        "composition_clause": {"found": False, "items": []},
+        "scoring_factors": [], "material_enumerations": [],
+        "format_templates": [], "dynamic_nodes": [],
+    }
+    assert _is_triple_empty(layer1, layer2) is True
+
+
+def test_is_triple_empty_any_signal_returns_false():
+    layer1 = {"has_any_template": False, "templates": []}
+    # composition_clause 有
+    layer2 = {
+        "composition_clause": {"found": True, "items": [{"order": 1, "title": "X"}]},
+        "scoring_factors": [], "material_enumerations": [],
+        "format_templates": [], "dynamic_nodes": [],
+    }
+    assert _is_triple_empty(layer1, layer2) is False
+    # Layer 1 有样例
+    assert _is_triple_empty(
+        {"has_any_template": True, "templates": [{"title": "X"}]},
+        {"composition_clause": {"found": False, "items": []},
+         "scoring_factors": [], "material_enumerations": [],
+         "format_templates": [], "dynamic_nodes": []},
+    ) is False
+    # scoring_factors 非空
+    layer2["composition_clause"]["found"] = False
+    layer2["composition_clause"]["items"] = []
+    layer2["scoring_factors"] = [{"category": "技术", "title": "X", "sub_items": []}]
+    assert _is_triple_empty(layer1, layer2) is False
+
+
+# ========== 主入口 extract_bid_outline ==========
+
+def _dummy_para(i):
+    return TaggedParagraph(index=i, text=f"段落{i}")
+
+
+def test_extract_bid_outline_triple_empty_returns_none():
+    paras = [_dummy_para(i) for i in range(10)]
+    empty_layer1 = {"has_any_template": False, "templates": []}
+    empty_layer2 = {
+        "composition_clause": {"found": False, "items": []},
+        "scoring_factors": [], "material_enumerations": [],
+        "format_templates": [], "dynamic_nodes": [],
+    }
+    with patch("src.extractor.bid_outline._run_layer1", return_value=empty_layer1), \
+         patch("src.extractor.bid_outline._extract_skeleton_signals",
+               return_value=empty_layer2):
+        result = extract_bid_outline(paras, settings=None)
+    assert result is None
+
+
+def test_extract_bid_outline_layer2_none_returns_none():
+    paras = [_dummy_para(i) for i in range(10)]
+    with patch("src.extractor.bid_outline._run_layer1",
+               return_value={"has_any_template": False, "templates": []}), \
+         patch("src.extractor.bid_outline._extract_skeleton_signals",
+               return_value=None):
+        result = extract_bid_outline(paras, settings=None)
+    assert result is None
+
+
+def test_extract_bid_outline_layer3_none_returns_none():
+    paras = [_dummy_para(i) for i in range(10)]
+    layer2 = {
+        "composition_clause": {"found": True,
+                                "items": [{"order": 1, "title": "X"}]},
+        "scoring_factors": [], "material_enumerations": [],
+        "format_templates": [], "dynamic_nodes": [],
+    }
+    with patch("src.extractor.bid_outline._run_layer1",
+               return_value={"has_any_template": False, "templates": []}), \
+         patch("src.extractor.bid_outline._extract_skeleton_signals",
+               return_value=layer2), \
+         patch("src.extractor.bid_outline._compose_outline_tree",
+               return_value=None):
+        result = extract_bid_outline(paras, settings=None)
+    assert result is None
+
+
+def test_extract_bid_outline_happy_path_returns_tree_with_numbers():
+    paras = [_dummy_para(i) for i in range(10)]
+    layer1 = {"has_any_template": True, "templates": [
+        {"title": "投标函", "type": "text", "content": "T"}
+    ]}
+    layer2 = {
+        "composition_clause": {"found": True,
+                                "items": [{"order": 1, "title": "投标函"}]},
+        "scoring_factors": [], "material_enumerations": [],
+        "format_templates": [], "dynamic_nodes": [],
+    }
+    fake_tree = {"title": "投标文件", "nodes": [
+        {"title": "投标函", "level": 1, "source": "format_template",
+         "has_sample": True, "dynamic": False, "children": []}
+    ]}
+    with patch("src.extractor.bid_outline._run_layer1", return_value=layer1), \
+         patch("src.extractor.bid_outline._extract_skeleton_signals",
+               return_value=layer2), \
+         patch("src.extractor.bid_outline._compose_outline_tree",
+               return_value=fake_tree):
+        result = extract_bid_outline(paras, settings=None)
+    assert result is not None
+    assert result["nodes"][0]["number"] == "一、"
+    assert result["nodes"][0].get("sample_content") is not None
+
+
+def test_extract_bid_outline_layer1_exception_continues():
+    """Layer 1 抛异常不应影响整体，视作无样例继续走。"""
+    paras = [_dummy_para(i) for i in range(10)]
+    layer2 = {
+        "composition_clause": {"found": True,
+                                "items": [{"order": 1, "title": "投标函"}]},
+        "scoring_factors": [{"category": "技术", "title": "X", "sub_items": []}],
+        "material_enumerations": [],
+        "format_templates": [], "dynamic_nodes": [],
+    }
+    fake_tree = {"title": "投标文件", "nodes": [
+        {"title": "投标函", "level": 1, "has_sample": False,
+         "dynamic": False, "children": []}
+    ]}
+    with patch("src.extractor.bid_outline._run_layer1",
+               side_effect=RuntimeError("layer1 boom")), \
+         patch("src.extractor.bid_outline._extract_skeleton_signals",
+               return_value=layer2), \
+         patch("src.extractor.bid_outline._compose_outline_tree",
+               return_value=fake_tree):
+        result = extract_bid_outline(paras, settings=None)
+    assert result is not None
+    assert result["nodes"][0]["number"] == "一、"

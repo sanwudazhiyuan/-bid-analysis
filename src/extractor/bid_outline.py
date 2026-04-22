@@ -356,3 +356,147 @@ def _add_table(doc, columns: list, rows: list) -> None:
         padded = list(row) + [""] * (ncols - len(row))
         for ci, cell in enumerate(padded[:ncols]):
             tbl.rows[ri].cells[ci].text = str(cell)
+
+
+# ========== 主入口：四层并行编排 ==========
+
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+
+
+def _layer1_sections_to_templates(sections) -> list:
+    """把旧 bid_format.txt 的 sections 结构展平为 templates 数组。
+
+    sections 可能含 type=group 的分组节点（带 children），需要递归展平。
+    """
+    out: list = []
+    if not sections:
+        return out
+    for s in sections:
+        if not isinstance(s, dict):
+            continue
+        st = s.get("type")
+        if st == "group":
+            out.extend(_layer1_sections_to_templates(s.get("children", [])))
+        elif st == "standard_table":
+            out.append({
+                "title": s.get("title", ""),
+                "type": "standard_table",
+                "columns": list(s.get("columns") or []),
+                "rows": [list(r) for r in (s.get("rows") or [])],
+            })
+        else:
+            out.append({
+                "title": s.get("title", ""),
+                "type": "text",
+                "content": s.get("content", "") or "",
+            })
+    return out
+
+
+def _run_layer1(
+    tagged_paragraphs: list[TaggedParagraph],
+    settings: dict | None,
+    embeddings_map: dict[int, list[float]] | None,
+    module_embedding: list[float] | None,
+) -> dict:
+    """Layer 1：复用现有 bid_format 的第一次 LLM 调用。
+
+    返回统一 schema: {"has_any_template": bool, "templates": [...]}。
+    遇到任何异常不抛、返回空结构，由主入口决定是否继续。
+    """
+    try:
+        # 延迟导入避免循环依赖（bid_format.py 会被 Task 13 精简为 helper 模块）
+        from src.extractor.bid_format import _filter_paragraphs, _first_pass
+
+        filtered, score_map = _filter_paragraphs(
+            tagged_paragraphs,
+            embeddings_map=embeddings_map,
+            module_embedding=module_embedding,
+        )
+        if not filtered:
+            return {"has_any_template": False, "templates": []}
+        raw = _first_pass(filtered, score_map, settings)
+        if not isinstance(raw, dict):
+            return {"has_any_template": False, "templates": []}
+        if raw.get("has_template") is False:
+            return {"has_any_template": False, "templates": []}
+
+        templates = _layer1_sections_to_templates(raw.get("sections", []))
+        return {
+            "has_any_template": len(templates) > 0,
+            "templates": templates,
+        }
+    except Exception as e:
+        logger.warning("bid_outline.layer1 失败: %s", e)
+        return {"has_any_template": False, "templates": []}
+
+
+def _is_triple_empty(layer1: dict, layer2: dict) -> bool:
+    """所有 5 类结构信号都为空时视为三重空。"""
+    if not isinstance(layer1, dict) or not isinstance(layer2, dict):
+        return True
+    if layer1.get("templates"):
+        return False
+    cc = layer2.get("composition_clause") or {}
+    if cc.get("found"):
+        return False
+    if layer2.get("scoring_factors"):
+        return False
+    if layer2.get("material_enumerations"):
+        return False
+    if layer2.get("format_templates"):
+        return False
+    if layer2.get("dynamic_nodes"):
+        return False
+    return True
+
+
+def extract_bid_outline(
+    tagged_paragraphs: list[TaggedParagraph],
+    settings: dict | None = None,
+    embeddings_map: dict[int, list[float]] | None = None,
+    module_embedding: list[float] | None = None,
+    modules_context: dict | None = None,  # 兼容旧签名，不再使用
+) -> dict | None:
+    """四层流水线主入口。返回目录树 JSON 或 None（失败/空信号）。
+
+    docx 落盘不在此函数内完成，调用方需渲染时调用 ``_render_docx(tree, path)``。
+    """
+    # Layer 1 与 Layer 2 并行（共两个 LLM 任务）
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fut_l1 = ex.submit(
+            _run_layer1, tagged_paragraphs, settings,
+            embeddings_map, module_embedding,
+        )
+        fut_l2 = ex.submit(
+            _extract_skeleton_signals, tagged_paragraphs, settings,
+            embeddings_map, module_embedding,
+        )
+        try:
+            layer1 = fut_l1.result()
+        except Exception as e:
+            logger.warning("bid_outline: Layer 1 抛异常: %s，视作无样例继续", e)
+            layer1 = {"has_any_template": False, "templates": []}
+        try:
+            layer2 = fut_l2.result()
+        except Exception as e:
+            logger.error("bid_outline: Layer 2 抛异常: %s", e)
+            layer2 = None
+
+    if layer2 is None:
+        logger.error("bid_outline: Layer 2 返回 None，整体失败")
+        return None
+
+    if _is_triple_empty(layer1, layer2):
+        logger.error("bid_outline: 三重空信号，无法生成大纲")
+        return None
+
+    tree = _compose_outline_tree(layer1, layer2, settings)
+    if tree is None:
+        logger.error("bid_outline: Layer 3 返回 None")
+        return None
+
+    _bind_sample_content(tree, layer1)
+    _assign_numbering(tree)
+
+    return tree
