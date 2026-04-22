@@ -17,7 +17,7 @@ const emit = defineEmits<{
   removeAnnotation: [annId: number]
 }>()
 
-const moduleKeys = computed(() => Object.keys(props.extractedData?.modules || {}))
+const moduleKeys = computed(() => Object.keys(props.extractedData?.modules || {}).filter(k => k !== BID_OUTLINE_MODULE_KEY))
 const activeModule = ref(moduleKeys.value[0] || '')
 const showAnnotationInput = ref<string | null>(null)
 const annotationText = ref('')
