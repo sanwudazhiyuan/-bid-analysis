@@ -10,6 +10,7 @@ module_embedding, modules_context=None) -> dict | None`。
 """
 import json as _json
 import logging
+import re as _re
 from pathlib import Path
 
 from src.models import TaggedParagraph
@@ -150,3 +151,108 @@ def _compose_outline_tree(
     if "title" not in result:
         result["title"] = "投标文件"
     return result
+
+
+# ========== 样例内容绑定（模糊匹配） ==========
+
+# 尾部后缀词（按长度降序排列，确保最长匹配优先，如"样表" 先于 "表"）
+_TITLE_SUFFIX_WORDS = ("格式", "模板", "样表", "样式", "表")
+
+
+def _normalize_title(title) -> str:
+    """归一化标题：去空格、剥离尾部后缀词（循环直至稳定）。"""
+    t = (title or "")
+    if not isinstance(t, str):
+        return ""
+    t = _re.sub(r"\s+", "", t.strip())
+    changed = True
+    while changed:
+        changed = False
+        for sw in _TITLE_SUFFIX_WORDS:
+            if t.endswith(sw) and len(t) > len(sw):
+                t = t[: -len(sw)]
+                changed = True
+                break  # 重新从最长后缀词开始检查
+    return t
+
+
+def _edit_distance_le2(a: str, b: str) -> bool:
+    """判定编辑距离 ≤ 2；不追求最优、朴素 DP。"""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 2:
+        return False
+    prev = list(range(lb + 1))
+    for i in range(1, la + 1):
+        cur = [i] + [0] * lb
+        for j in range(1, lb + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost)
+        prev = cur
+    return prev[lb] <= 2
+
+
+def _find_template_for_title(node_title: str, templates: list) -> dict | None:
+    """按归一化精确 → 子串 → 编辑距离 ≤ 2 顺序查找匹配模板。"""
+    if not templates:
+        return None
+    target = _normalize_title(node_title)
+    if not target:
+        return None
+    # 1. 归一化精确匹配
+    for t in templates:
+        if _normalize_title(t.get("title", "")) == target:
+            return t
+    # 2. 子串（双向）
+    for t in templates:
+        tnorm = _normalize_title(t.get("title", ""))
+        if tnorm and (tnorm in target or target in tnorm):
+            return t
+    # 3. 编辑距离
+    for t in templates:
+        tnorm = _normalize_title(t.get("title", ""))
+        if tnorm and _edit_distance_le2(tnorm, target):
+            return t
+    return None
+
+
+def _extract_sample_payload(template: dict) -> dict:
+    """从 Layer 1 template 剥出 Layer 4 渲染所需的 sample_content。"""
+    t = template.get("type", "text")
+    if t == "standard_table":
+        return {
+            "type": "standard_table",
+            "columns": list(template.get("columns") or []),
+            "rows": [list(r) for r in (template.get("rows") or [])],
+        }
+    return {"type": "text", "content": template.get("content", "") or ""}
+
+
+def _bind_sample_content(tree: dict, layer1_result: dict | None) -> None:
+    """递归为 tree 中 has_sample=true 的节点绑定 sample_content（原地修改）。
+
+    - has_sample=true 但无匹配 → sample_content=None，has_sample 标记保留
+    - has_sample=false → 不触碰节点字段
+    """
+    templates: list = []
+    if isinstance(layer1_result, dict):
+        templates = [t for t in (layer1_result.get("templates") or [])
+                     if isinstance(t, dict)]
+
+    def _walk(node: dict) -> None:
+        if node.get("has_sample"):
+            match = _find_template_for_title(node.get("title", ""), templates)
+            if match:
+                node["sample_content"] = _extract_sample_payload(match)
+            else:
+                node["sample_content"] = None
+                logger.warning(
+                    "bid_outline.bind: has_sample=True 但未匹配到样例 title=%s",
+                    node.get("title"),
+                )
+        for child in node.get("children") or []:
+            _walk(child)
+
+    for n in tree.get("nodes") or []:
+        _walk(n)

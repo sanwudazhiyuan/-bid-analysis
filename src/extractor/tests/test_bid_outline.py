@@ -4,6 +4,9 @@ from unittest.mock import patch
 from src.extractor.bid_outline import (
     _merge_skeleton_batches,
     _compose_outline_tree,
+    _bind_sample_content,
+    _normalize_title,
+    _edit_distance_le2,
 )
 
 
@@ -144,3 +147,103 @@ def test_compose_outline_tree_passes_template_titles():
                                         "format_templates": [], "dynamic_nodes": []}, None)
     assert "投标函" in captured["user"]
     assert "开标一览表" in captured["user"]
+
+
+# ========== 样例绑定（模糊匹配） ==========
+
+def test_normalize_title_strips_suffix_words_and_spaces():
+    assert _normalize_title("投标函 格式") == "投标函"
+    assert _normalize_title("  投标函模板  ") == "投标函"
+    assert _normalize_title("开标一览表") == "开标一览"
+    assert _normalize_title("授权委托书样表") == "授权委托书"
+    assert _normalize_title("投标函样表格式") == "投标函"
+
+
+def test_normalize_title_handles_empty_and_none():
+    assert _normalize_title("") == ""
+    assert _normalize_title(None) == ""
+
+
+def test_edit_distance_le2():
+    assert _edit_distance_le2("abc", "abc") is True  # 0
+    assert _edit_distance_le2("abc", "abd") is True  # 1
+    assert _edit_distance_le2("abc", "xyz") is False  # 3
+    assert _edit_distance_le2("abcde", "ab") is False  # 3
+    assert _edit_distance_le2("投标函", "投标书") is True  # 1
+    assert _edit_distance_le2("投标函", "完全不同") is False
+
+
+def test_bind_sample_content_exact_normalized_match():
+    tree = {"nodes": [
+        {"title": "投标函格式", "level": 1, "has_sample": True, "children": []}
+    ]}
+    layer1 = {"templates": [
+        {"title": "投标函", "type": "text", "content": "TEMPLATE_CONTENT"}
+    ]}
+    _bind_sample_content(tree, layer1)
+    assert tree["nodes"][0]["sample_content"] == {
+        "type": "text", "content": "TEMPLATE_CONTENT"
+    }
+
+
+def test_bind_sample_content_substring_match():
+    tree = {"nodes": [
+        {"title": "开标报价一览表", "level": 1, "has_sample": True, "children": []}
+    ]}
+    layer1 = {"templates": [
+        {"title": "开标一览表", "type": "standard_table",
+         "columns": ["A"], "rows": [["1"]]}
+    ]}
+    _bind_sample_content(tree, layer1)
+    bound = tree["nodes"][0]["sample_content"]
+    assert bound["type"] == "standard_table"
+    assert bound["columns"] == ["A"]
+    assert bound["rows"] == [["1"]]
+
+
+def test_bind_sample_content_no_match_leaves_none_and_keeps_has_sample():
+    tree = {"nodes": [
+        {"title": "完全不相关的标题XYZ", "level": 1, "has_sample": True, "children": []}
+    ]}
+    layer1 = {"templates": [
+        {"title": "投标函", "type": "text", "content": "T"}
+    ]}
+    _bind_sample_content(tree, layer1)
+    assert tree["nodes"][0]["sample_content"] is None
+    assert tree["nodes"][0]["has_sample"] is True
+
+
+def test_bind_sample_content_recurses_into_children():
+    tree = {"nodes": [
+        {"title": "附件", "level": 1, "has_sample": False, "children": [
+            {"title": "投标函", "level": 2, "has_sample": True, "children": []}
+        ]}
+    ]}
+    layer1 = {"templates": [
+        {"title": "投标函", "type": "text", "content": "T"}
+    ]}
+    _bind_sample_content(tree, layer1)
+    assert tree["nodes"][0]["children"][0]["sample_content"] is not None
+
+
+def test_bind_sample_content_ignores_nodes_without_has_sample():
+    """has_sample=False 的节点不应被污染 sample_content 字段。"""
+    tree = {"nodes": [
+        {"title": "投标函", "level": 1, "has_sample": False, "children": []}
+    ]}
+    layer1 = {"templates": [
+        {"title": "投标函", "type": "text", "content": "T"}
+    ]}
+    _bind_sample_content(tree, layer1)
+    assert "sample_content" not in tree["nodes"][0]
+
+
+def test_bind_sample_content_handles_missing_layer1():
+    """Layer 1 None / 空 templates 时不崩，has_sample=true 留 None。"""
+    tree = {"nodes": [
+        {"title": "投标函", "level": 1, "has_sample": True, "children": []}
+    ]}
+    _bind_sample_content(tree, None)
+    assert tree["nodes"][0]["sample_content"] is None
+    _bind_sample_content(tree, {"templates": []})
+    assert tree["nodes"][0]["sample_content"] is None
