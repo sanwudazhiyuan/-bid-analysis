@@ -256,3 +256,35 @@ def _bind_sample_content(tree: dict, layer1_result: dict | None) -> None:
 
     for n in tree.get("nodes") or []:
         _walk(n)
+
+
+# ========== 编号后处理 ==========
+
+_CN_NUMERALS = [
+    "一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
+    "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
+]
+
+
+def _cn_numeral(n: int) -> str:
+    """1~20 返回中文数字，其它降级为阿拉伯数字字符串。"""
+    if isinstance(n, int) and 1 <= n <= 20:
+        return _CN_NUMERALS[n - 1]
+    return str(n)
+
+
+def _assign_numbering(tree: dict) -> None:
+    """深度优先为 tree.nodes 每个节点赋 number 字段（原地修改）。
+
+    - Level 1：`{中文数字}、`
+    - Level 2+：`{父阿拉伯编号}.{本级序号}`
+    """
+    for i, node in enumerate(tree.get("nodes") or [], start=1):
+        node["number"] = f"{_cn_numeral(i)}、"
+        _assign_sub(node, prefix=str(i))
+
+
+def _assign_sub(parent: dict, prefix: str) -> None:
+    for j, child in enumerate(parent.get("children") or [], start=1):
+        child["number"] = f"{prefix}.{j}"
+        _assign_sub(child, prefix=f"{prefix}.{j}")

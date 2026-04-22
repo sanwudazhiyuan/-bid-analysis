@@ -7,6 +7,8 @@ from src.extractor.bid_outline import (
     _bind_sample_content,
     _normalize_title,
     _edit_distance_le2,
+    _assign_numbering,
+    _cn_numeral,
 )
 
 
@@ -247,3 +249,62 @@ def test_bind_sample_content_handles_missing_layer1():
     assert tree["nodes"][0]["sample_content"] is None
     _bind_sample_content(tree, {"templates": []})
     assert tree["nodes"][0]["sample_content"] is None
+
+
+# ========== 编号 ==========
+
+def test_cn_numeral_1_to_20():
+    expected = ["一","二","三","四","五","六","七","八","九","十",
+                "十一","十二","十三","十四","十五","十六","十七","十八","十九","二十"]
+    for i, e in enumerate(expected, start=1):
+        assert _cn_numeral(i) == e
+
+
+def test_cn_numeral_over_20_falls_back_to_arabic():
+    assert _cn_numeral(21) == "21"
+    assert _cn_numeral(99) == "99"
+
+
+def test_cn_numeral_zero_or_negative_returns_arabic():
+    """极端防御：非 1-20 范围统一降级。"""
+    assert _cn_numeral(0) == "0"
+    assert _cn_numeral(-1) == "-1"
+
+
+def test_assign_numbering_three_level_tree():
+    tree = {"nodes": [
+        {"title": "附件", "level": 1, "children": [
+            {"title": "资质证书", "level": 2, "children": [
+                {"title": "A证书", "level": 3, "children": []},
+                {"title": "B证书", "level": 3, "children": []},
+            ]},
+            {"title": "业绩", "level": 2, "children": []},
+        ]},
+        {"title": "技术部分", "level": 1, "children": [
+            {"title": "质量方案", "level": 2, "children": []},
+        ]},
+    ]}
+    _assign_numbering(tree)
+    assert tree["nodes"][0]["number"] == "一、"
+    assert tree["nodes"][0]["children"][0]["number"] == "1.1"
+    assert tree["nodes"][0]["children"][0]["children"][0]["number"] == "1.1.1"
+    assert tree["nodes"][0]["children"][0]["children"][1]["number"] == "1.1.2"
+    assert tree["nodes"][0]["children"][1]["number"] == "1.2"
+    assert tree["nodes"][1]["number"] == "二、"
+    assert tree["nodes"][1]["children"][0]["number"] == "2.1"
+
+
+def test_assign_numbering_empty_tree():
+    tree = {"nodes": []}
+    _assign_numbering(tree)  # 不崩溃
+    assert tree["nodes"] == []
+
+
+def test_assign_numbering_overflow_level1():
+    """超过 20 个 level 1 节点时 21 起用阿拉伯数字。"""
+    tree = {"nodes": [
+        {"title": f"章节{i}", "level": 1, "children": []} for i in range(1, 22)
+    ]}
+    _assign_numbering(tree)
+    assert tree["nodes"][19]["number"] == "二十、"
+    assert tree["nodes"][20]["number"] == "21、"
