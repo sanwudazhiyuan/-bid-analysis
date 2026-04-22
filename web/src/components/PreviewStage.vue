@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
+import { Download, RotateCcw } from 'lucide-vue-next'
 import client from '../api/client'
 
 const props = defineProps<{
@@ -11,7 +12,7 @@ const emit = defineEmits<{ reset: [] }>()
 
 const tabs = [
   { key: 'report', label: '分析报告' },
-  { key: 'format', label: '投标文件格式' },
+  { key: 'format', label: '投标文件大纲' },
   { key: 'checklist', label: '资料清单' },
 ]
 
@@ -60,54 +61,63 @@ function downloadAll() {
 </script>
 
 <template>
-  <div class="flex flex-col h-full">
+  <div class="flex flex-col h-full animate-fade-in">
     <!-- Tab bar -->
-    <div class="flex border-b border-border bg-surface">
-      <button
-        v-for="tab in tabs"
-        :key="tab.key"
-        @click="activeTab = tab.key"
-        :class="[
-          'px-5 py-2.5 text-sm transition-colors',
-          activeTab === tab.key
-            ? 'border-b-2 border-success text-success font-medium'
-            : 'text-text-muted hover:text-text-secondary'
-        ]"
-      >
-        {{ tab.label }}
-      </button>
-    </div>
-
-    <!-- Preview area -->
-    <div class="flex-1 overflow-auto p-6 bg-surface">
-      <div v-if="loading" class="text-center text-text-muted py-12">加载中...</div>
-      <div v-else class="prose max-w-none" v-html="previewHtml" />
-    </div>
-
-    <!-- Bottom bar -->
-    <div class="border-t border-border px-4 py-3 flex items-center justify-between bg-surface">
-      <span class="text-xs text-text-muted">{{ filename }}</span>
-      <div class="flex gap-2">
+    <div class="flex items-center border-b border-border bg-surface px-4">
+      <div class="flex gap-1">
         <button
-          class="px-4 py-2 text-sm border border-border rounded-lg text-text-secondary hover:bg-background"
-          @click="downloadFile(activeTab)"
-        >下载当前</button>
-        <button
-          class="px-4 py-2 text-sm bg-success text-white rounded-lg hover:bg-success/90"
-          @click="downloadAll"
-        >全部下载</button>
+          v-for="tab in tabs"
+          :key="tab.key"
+          @click="activeTab = tab.key"
+          :class="[
+            'px-4 py-3 text-sm font-medium transition-all duration-200 relative',
+            activeTab === tab.key
+              ? 'text-primary'
+              : 'text-text-muted hover:text-text-secondary'
+          ]"
+        >
+          {{ tab.label }}
+          <span
+            v-if="activeTab === tab.key"
+            class="absolute bottom-0 left-2 right-2 h-0.5 bg-primary rounded-full"
+          />
+        </button>
       </div>
     </div>
 
-    <!-- New analysis -->
-    <div class="px-4 pb-3 flex justify-end bg-surface">
+    <!-- Preview area -->
+    <div class="flex-1 overflow-auto p-6 bg-background">
+      <div v-if="loading" class="text-center text-text-muted py-12 animate-pulse-soft">加载中...</div>
+      <div v-else class="bg-surface rounded-xl border border-border p-6 shadow-xs">
+        <div class="prose max-w-none" v-html="previewHtml" />
+      </div>
+    </div>
+
+    <!-- Bottom bar -->
+    <div class="border-t border-border px-5 py-3 flex items-center justify-between bg-surface">
       <button
         data-testid="new-analysis"
-        class="text-sm text-text-muted hover:text-text-secondary"
+        class="text-sm text-text-muted hover:text-text-secondary transition-colors inline-flex items-center gap-1.5"
         @click="emit('reset')"
       >
+        <RotateCcw class="size-3.5" />
         开始新的解读
       </button>
+      <div class="flex gap-2.5">
+        <button
+          class="px-4 py-2 text-sm border border-border rounded-xl text-text-secondary hover:bg-background hover:border-text-muted transition-all duration-200 active:scale-[0.98]"
+          @click="downloadFile(activeTab)"
+        >
+          下载当前
+        </button>
+        <button
+          class="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-xl font-medium hover:bg-primary-hover hover:shadow-md transition-all duration-200 active:scale-[0.98] inline-flex items-center gap-1.5"
+          @click="downloadAll"
+        >
+          <Download class="size-3.5" />
+          全部下载
+        </button>
+      </div>
     </div>
   </div>
 </template>
