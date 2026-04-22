@@ -8,6 +8,7 @@ Layer 4: docx 渲染（纯代码，无 LLM）
 对外入口：`extract_bid_outline(tagged_paragraphs, settings, embeddings_map,
 module_embedding, modules_context=None) -> dict | None`。
 """
+import json as _json
 import logging
 from pathlib import Path
 
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _CONFIG_DIR = Path(__file__).parent.parent.parent / "config"
 SKELETON_PROMPT_PATH = _CONFIG_DIR / "prompts" / "bid_format_skeleton.txt"
+COMPOSE_PROMPT_PATH = _CONFIG_DIR / "prompts" / "bid_format_compose.txt"
 
 BATCH_SIZE = 40
 TOKEN_SAFETY_CAP = 100_000
@@ -111,3 +113,40 @@ def _extract_skeleton_signals(
         return None
 
     return _merge_skeleton_batches(batch_results)
+
+
+# ========== Layer 3：目录合成 ==========
+
+def _compose_outline_tree(
+    layer1_result: dict | None,
+    layer2_result: dict | None,
+    settings: dict | None,
+) -> dict | None:
+    """Layer 3：输入 Layer 1 样例 title 列表 + Layer 2 结构信号，输出多级目录树。
+
+    输出未编号、未绑定 sample_content。LLM 返回非 dict 或缺 `nodes` 返回 None。
+    """
+    template_titles: list[str] = []
+    if isinstance(layer1_result, dict) and layer1_result.get("has_any_template"):
+        for t in layer1_result.get("templates") or []:
+            if isinstance(t, dict) and t.get("title"):
+                template_titles.append(t["title"])
+
+    safe_layer2 = layer2_result if isinstance(layer2_result, dict) else _empty_skeleton()
+
+    payload = {
+        "layer1_template_titles": template_titles,
+        "layer2_skeleton": safe_layer2,
+    }
+
+    system_prompt = load_prompt_template(str(COMPOSE_PROMPT_PATH))
+    user_text = _json.dumps(payload, ensure_ascii=False, indent=2)
+    messages = build_messages(system=system_prompt, user=user_text)
+
+    result = call_qwen(messages, settings)
+    if not isinstance(result, dict) or "nodes" not in result:
+        logger.error("bid_outline.layer3: LLM 返回非法结构: %s", type(result).__name__)
+        return None
+    if "title" not in result:
+        result["title"] = "投标文件"
+    return result
