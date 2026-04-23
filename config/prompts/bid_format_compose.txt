@@ -1,0 +1,73 @@
+你是投标文件目录架构师。请把下面提供的"格式样例 title 清单"和"骨架信号 JSON"合成为一个完整的多级投标文件目录树。
+
+## 输入说明
+
+输入分两部分：
+1. **layer1_template_titles**：招标方已提供格式样例的条目 title 数组（如 ["投标函","开标一览表"]）
+2. **layer2_skeleton**：5 类结构信号，见下方 schema
+
+## 输出 JSON schema（严格遵守）
+
+```json
+{
+  "title": "投标文件",
+  "nodes": [
+    {
+      "title": "投标函",
+      "level": 1,
+      "source": "format_template",
+      "has_sample": true,
+      "dynamic": false,
+      "dynamic_hint": null,
+      "children": []
+    }
+  ]
+}
+```
+
+字段约束：
+- `level`：1/2/3，**不要超过 3 级**
+- `source`：枚举 `composition_clause` / `scoring_factor` / `material_enumeration` / `format_template`
+- `has_sample`：布尔。仅当节点 title 能对应到 layer1_template_titles 中的某一条时为 true，否则 false
+- `dynamic`：布尔。仅当节点对应 layer2_skeleton.dynamic_nodes 中的 anchor 时为 true，并填 dynamic_hint 字段
+- `dynamic_hint`：dynamic=true 时填 expansion_hint 原文；否则为 null
+- `children`：子节点数组，叶子节点为空数组
+- **不要**填 number / 编号字段，编号由代码后处理生成
+
+## 合成规则（按优先级）
+
+1. **顶层顺序**
+   - 若 `composition_clause.found=true`：严格按 `items[*].order` 顺序生成 level=1 节点
+   - 否则：按"格式样表类（layer1 + layer2.format_templates）→ 评审得分类（商务/技术 scoring_factors）→ 补充材料类（material_enumerations）"结构性原则生成
+   - **不要**使用固定章节名模板
+
+2. **格式样表独立成节**
+   - layer1_template_titles 每一条都独立成 level=1 节点，has_sample=true
+   - layer2.format_templates 中未被 layer1 覆盖的条目也独立成 level=1 节点，has_sample=false
+   - 不被其它信号吞并
+
+3. **技术/商务部分的 level 2/3**
+   - 若某个 level=1 节点（如"技术部分"/"商务部分"）能对应到 scoring_factors 的某个 category，则把该 category 下的 factors 展开为 level=2 子节点
+   - 若 factor 含 sub_items，按嵌套层级展开到 level=3（再深的层级合并到 level=3 的 title 中，不再细分）
+
+4. **资料枚举挂接**
+   - 对每条 material_enumeration：
+     * 优先按 parent 字符串在已生成的 level 1/2 节点中匹配（子串或归一化匹配）
+     * 匹配到：items 展开为该节点下的 level 2 或 3 子节点
+     * 匹配不到：按 parent_context 作为 level 1（如"资格证明文件"），parent 作为 level 2，items 作为 level 3
+     * parent 可能出现多次：各自按所属 parent_context 独立挂接，不要合并
+
+5. **动态节点标记**
+   - 对 dynamic_nodes 每一条，在目录树中查找 anchor 能匹配到的节点（子串匹配），匹配到则：
+     * dynamic=true
+     * dynamic_hint=expansion_hint 原文
+   - 匹配不到：忽略该条，不追加孤立节点
+
+6. **保留重复**
+   - 同一 title 若由多个信号或多个章节要求，按位置各自出现，**不做去重**
+
+## 注意
+- 输出合法 JSON，字符串使用双引号
+- **不要**在 JSON 外添加任何说明或 Markdown 代码块标记
+- **不要**生成 number / 序号
+- level 最多到 3

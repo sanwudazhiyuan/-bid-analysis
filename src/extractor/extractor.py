@@ -16,7 +16,7 @@ _MODULE_REGISTRY = {
     "module_e": ("src.extractor.module_e", "extract_module_e"),
     "module_f": ("src.extractor.module_f", "extract_module_f"),
     "module_g": ("src.extractor.module_g", "extract_module_g"),
-    "bid_format": ("src.extractor.bid_format", "extract_bid_format"),
+    "bid_format": ("src.extractor.bid_outline", "extract_bid_outline"),
     "checklist": ("src.extractor.checklist", "extract_checklist"),
 }
 
@@ -54,9 +54,6 @@ def extract_all(
                 embeddings_map=embeddings_map,
                 module_embedding=module_emb,
             )
-            # bid_format 需要前序模块结果作为上下文
-            if key == "bid_format":
-                kwargs["modules_context"] = modules
             result = func(tagged_paragraphs, settings, **kwargs)
             modules[key] = result
             status = "成功" if result is not None else "返回 None"
@@ -78,7 +75,6 @@ def extract_single_module(
     settings: dict | None = None,
     embeddings_map: dict[int, list[float]] | None = None,
     module_embeddings: dict[str, list[float]] | None = None,
-    modules_context: dict | None = None,
 ) -> dict | None:
     """提取单个模块，供 Web Celery Worker 调用。"""
     if module_key not in _MODULE_REGISTRY:
@@ -91,6 +87,4 @@ def extract_single_module(
         embeddings_map=embeddings_map,
         module_embedding=module_emb,
     )
-    if module_key == "bid_format" and modules_context is not None:
-        kwargs["modules_context"] = modules_context
     return func(tagged_paragraphs, settings, **kwargs)

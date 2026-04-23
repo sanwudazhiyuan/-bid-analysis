@@ -107,3 +107,76 @@ def test_render_format_creates_parent_dirs(tmp_path, extracted_data):
     out = str(tmp_path / "sub" / "format.docx")
     render_format(extracted_data, out)
     assert os.path.exists(out)
+
+
+def test_render_format_nodes_tree(tmp_path):
+    """新结构（nodes 树）渲染：包含编号、动态节点、样表嵌入"""
+    data = {
+        "schema_version": "1.0",
+        "modules": {
+            "bid_format": {
+                "title": "投标文件",
+                "nodes": [
+                    {
+                        "title": "投标函",
+                        "level": 1,
+                        "number": "一、",
+                        "source": "format_template",
+                        "has_sample": True,
+                        "dynamic": False,
+                        "dynamic_hint": None,
+                        "sample_content": {"type": "text", "content": "致：采购人"},
+                        "children": [],
+                    },
+                    {
+                        "title": "技术部分",
+                        "level": 1,
+                        "number": "二、",
+                        "source": "scoring_factor",
+                        "has_sample": False,
+                        "dynamic": False,
+                        "dynamic_hint": None,
+                        "children": [
+                            {
+                                "title": "实施方案",
+                                "level": 2,
+                                "number": "2.1",
+                                "source": "scoring_factor",
+                                "has_sample": False,
+                                "dynamic": True,
+                                "dynamic_hint": "根据评分细则展开",
+                                "children": [],
+                            },
+                        ],
+                    },
+                    {
+                        "title": "报价表",
+                        "level": 1,
+                        "number": "三、",
+                        "source": "format_template",
+                        "has_sample": True,
+                        "dynamic": False,
+                        "dynamic_hint": None,
+                        "sample_content": {
+                            "type": "standard_table",
+                            "columns": ["序号", "服务内容", "单价"],
+                            "rows": [["1", "制卡服务", "100"]],
+                        },
+                        "children": [],
+                    },
+                ],
+            },
+        },
+    }
+    out = str(tmp_path / "outline.docx")
+    render_format(data, out)
+    assert os.path.exists(out)
+
+    doc = Document(out)
+    full_text = "\n".join(p.text for p in doc.paragraphs)
+    # 目录 + 标题 + 动态提示
+    assert "投标函" in full_text
+    assert "实施方案" in full_text
+    assert "根据评分细则展开" in full_text
+    # 样表嵌入 → 表格
+    assert len(doc.tables) >= 1

@@ -1,0 +1,91 @@
+你是招标文件结构分析专家。请从以下招标文件段落中抽取 5 类"结构信号"，用于下游生成投标文件目录。
+
+## 隐私保护规则
+投标文件中的个人隐私数据以占位符表示，保持原样输出即可。
+
+## 抽取目标（5 类字段）
+
+### ① composition_clause
+招标方是否明文规定了"投标文件由以下部分组成"。只要找到一句类似表述，就填 found=true 并按顺序列出 items；找不到则 found=false 且 items 为空数组。
+
+### ② scoring_factors
+评分办法 / 评审办法中列出的得分因素（按 category=技术 / 商务 分类）。每条因素可以有 sub_items 递归嵌套，**没有子项时 sub_items 为空数组**。抽取因素名、权重/分值（若原文给出），不抽取评分细则文本（不要抽"提供 X 得 N 分"这种评分规则）。
+
+### ③ material_enumerations
+招标方在条款中列出的具体材料清单，**保留每个具体条目**（不要聚合成大类）。典型模式：
+- "应提供以下资质证书：A、B、C..." → parent="资质证书", items=["A","B","C"]
+- "提供近三年财务报告" → 交给 dynamic_nodes 处理，不要放在 material_enumerations
+- parent_context 是 parent 的上级章节（如"资格证明文件"），用于消歧
+
+### ④ format_templates
+招标文件提到的所有模板/样表名（投标函、授权委托书、开标一览表等）。has_sample=true 表示招标文件正文附有样例内容；has_sample=false 表示只点了名但没给样本。
+
+### ⑤ dynamic_nodes
+需要投标人按**实际数据**展开的节点。关键识别模式：
+- "近 N 年..." → expansion_type=year_range, expansion_count_hint=N
+- "类似项目业绩按客户 / 按项目逐项列举" → expansion_type=customer_list
+- "以下各项 / 分别列明" 且数量由投标人决定 → expansion_type=item_list
+- 其他 → expansion_type=other
+
+## 严格输出 JSON（顶层必须是一个对象，五个字段均为数组/对象）
+
+```json
+{
+  "composition_clause": {
+    "found": true,
+    "items": [
+      {"order": 1, "title": "商务文件", "note": "投标函、报价表..."}
+    ]
+  },
+  "scoring_factors": [
+    {
+      "category": "技术",
+      "title": "应对灾害防御能力",
+      "weight": "10分",
+      "sub_items": [
+        {
+          "title": "业务连续性计划",
+          "sub_items": [
+            {"title": "国内两个个人化分中心管理", "sub_items": []}
+          ]
+        }
+      ]
+    }
+  ],
+  "material_enumerations": [
+    {
+      "parent": "资质证书",
+      "parent_context": "资格证明文件",
+      "items": ["集成电路卡注册证书", "银联标识产品企业资质认证证书"],
+      "source_para": 234
+    }
+  ],
+  "format_templates": [
+    {"title": "投标函", "has_sample": true},
+    {"title": "授权委托书", "has_sample": false}
+  ],
+  "dynamic_nodes": [
+    {
+      "anchor": "类似项目业绩",
+      "expansion_type": "customer_list",
+      "expansion_hint": "按客户/项目逐项展开",
+      "expansion_count_hint": null
+    },
+    {
+      "anchor": "近三年财务报告",
+      "expansion_type": "year_range",
+      "expansion_hint": "按年度（近三年）逐年展开",
+      "expansion_count_hint": 3
+    }
+  ]
+}
+```
+
+## 规则与注意事项
+
+1. **只抽结构信号**，不抽条款正文。例如不要抽"质量保证金 10%"这种合同条款数值
+2. **不做去重**：同一条目在多个段落出现就出现多次
+3. **五个顶层字段都必须存在**：没抽到的字段给空数组 / found=false
+4. 所有字符串使用双引号，JSON 合法可解析
+5. source_para 为段落 index（原文标注的 [N]），有就填，没有可省略字段
+6. **不要**在 JSON 外添加任何说明文字或 Markdown 代码块标记

@@ -114,16 +114,14 @@ def run_pipeline(self, task_id: str):
         modules_result = {}
         MAX_EXTRACT_WORKERS = 2 if is_local_mode else 8
 
-        def _extract_module(module_key: str, extra_kwargs: dict | None = None) -> tuple[str, dict | None]:
+        def _extract_module(module_key: str) -> tuple[str, dict | None]:
             try:
-                kwargs = dict(
+                return module_key, extract_single_module(
+                    module_key,
+                    tagged,
+                    api_settings,
                     embeddings_map=embeddings_map,
                     module_embeddings=module_embeddings,
-                )
-                if extra_kwargs:
-                    kwargs.update(extra_kwargs)
-                return module_key, extract_single_module(
-                    module_key, tagged, api_settings, **kwargs,
                 )
             except Exception as e:
                 return module_key, {"status": "failed", "error": str(e)}
@@ -149,12 +147,11 @@ def run_pipeline(self, task_id: str):
                     },
                 )
 
-        # Phase 2: bid_format, checklist（bid_format 需要 phase1 结果）
+        # Phase 2: bid_format, checklist
         with ThreadPoolExecutor(max_workers=2) as executor:
-            phase2_futures = {}
-            for mk in _PHASE2_KEYS:
-                extra = {"modules_context": modules_result} if mk == "bid_format" else None
-                phase2_futures[executor.submit(_extract_module, mk, extra)] = mk
+            phase2_futures = {
+                executor.submit(_extract_module, mk): mk for mk in _PHASE2_KEYS
+            }
             for future in as_completed(phase2_futures):
                 completed += 1
                 module_key, result_data = future.result()

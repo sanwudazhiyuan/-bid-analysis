@@ -277,3 +277,161 @@ def generate_review_docx(
     output_path = os.path.join(output_dir, output_filename)
     doc.save(output_path)
     return output_path
+
+
+def generate_anbiao_review_docx(
+    tender_file_path: str,
+    format_results: list[dict],
+    content_results: list[dict],
+    summary: dict,
+    rule_filename: str = "",
+    tender_filename: str = "",
+    output_dir: str | None = None,
+) -> str:
+    """Generate anbiao review docx with dual summary tables + highlights + comments."""
+    doc = Document(tender_file_path)
+
+    # Build para_review_map from content_results only (format results don't map to paragraphs)
+    para_review_map = _build_para_review_map(content_results)
+
+    comment_mgr = _CommentManager(doc)
+    from docx.oxml.ns import qn
+    body = doc.element.body
+
+    para_idx = 0
+    for element in body:
+        tag = element.tag
+        if tag == qn("w:p"):
+            runs_text = []
+            for r in element.findall(qn("w:r")):
+                t = r.find(qn("w:t"))
+                if t is not None and t.text:
+                    runs_text.append(t.text)
+            text = "".join(runs_text).strip()
+            if not text:
+                continue
+
+            if para_idx in para_review_map:
+                entries = para_review_map[para_idx]
+                highlight_color = "red" if any(item["result"] == "fail" for item, _ in entries) else "yellow"
+                _highlight_paragraph(element, highlight_color)
+                for item, per_para_reason in entries:
+                    result_label = {"pass": "合规", "fail": "不合规", "warning": "需注意"}.get(item["result"], item["result"])
+                    display_reason = per_para_reason or item.get("reason", "")
+                    comment_text = (
+                        f"[暗标审查 #{item.get('clause_index', '')}] "
+                        f"置信度: {item.get('confidence', 0)}%\n"
+                        f"判定: {_result_symbol(item['result'])} {result_label}\n"
+                        f"规则: {item.get('clause_text', '')}\n"
+                        f"原因: {display_reason}"
+                    )
+                    comment_mgr.add_comment(element, comment_text)
+            para_idx += 1
+        elif tag == qn("w:tbl"):
+            para_idx += 1
+
+    # Insert summary at beginning
+    original_count = len(list(body))
+    _add_anbiao_summary_section(doc, format_results, content_results, summary, rule_filename, tender_filename)
+
+    new_elements = list(body)[original_count:]
+    for i, elem in enumerate(new_elements):
+        body.remove(elem)
+        body.insert(i, elem)
+
+    if output_dir is None:
+        output_dir = os.path.dirname(tender_file_path)
+    output_filename = f"暗标审查报告_{os.path.basename(tender_file_path)}"
+    output_path = os.path.join(output_dir, output_filename)
+    doc.save(output_path)
+    return output_path
+
+
+def _add_anbiao_summary_section(doc, format_results, content_results, summary,
+                                 rule_filename, tender_filename):
+    """Insert anbiao summary with dual tables."""
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.add_run("暗标审查报告")
+    run.bold = True
+    run.font.size = Pt(18)
+
+    meta = doc.add_paragraph()
+    meta.add_run(f"暗标规则: {rule_filename}").font.size = Pt(10)
+    meta.add_run("\n")
+    meta.add_run(f"审查文件: {tender_filename}").font.size = Pt(10)
+    meta.add_run("\n")
+    meta.add_run(f"审查时间: {datetime.date.today().isoformat()}").font.size = Pt(10)
+
+    stats = doc.add_paragraph()
+    stats_text = f"共{summary['total']}条 | 通过{summary['pass']} | 不通过{summary['fail']} | 警告{summary['warning']}"
+    stats.add_run(stats_text).font.size = Pt(10)
+
+    # Format results table
+    if format_results:
+        doc.add_paragraph()
+        fmt_title = doc.add_paragraph()
+        fmt_title.add_run("格式审查结果").bold = True
+        fmt_title.runs[0].font.size = Pt(14)
+
+        table = doc.add_table(rows=1, cols=4)
+        table.style = "Table Grid"
+        for i, h in enumerate(["序号", "规则", "结果", "说明"]):
+            cell = table.rows[0].cells[i]
+            cell.text = h
+            for p in cell.paragraphs:
+                for r in p.runs:
+                    r.bold = True
+                    r.font.size = Pt(9)
+
+        for idx, item in enumerate(format_results):
+            row = table.add_row()
+            row.cells[0].text = str(idx + 1)
+            row.cells[1].text = item.get("rule_text", "")
+            row.cells[2].text = _result_symbol(item.get("result", ""))
+            row.cells[3].text = item.get("reason", "")
+            # Color the result cell
+            for p in row.cells[2].paragraphs:
+                for r in p.runs:
+                    r.font.color.rgb = _result_color(item.get("result", ""))
+                    r.font.size = Pt(8)
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    for r in p.runs:
+                        r.font.size = Pt(8)
+
+    # Content results table
+    if content_results:
+        doc.add_paragraph()
+        ct_title = doc.add_paragraph()
+        ct_title.add_run("内容审查结果").bold = True
+        ct_title.runs[0].font.size = Pt(14)
+
+        table = doc.add_table(rows=1, cols=5)
+        table.style = "Table Grid"
+        for i, h in enumerate(["序号", "规则", "结果", "置信度", "说明"]):
+            cell = table.rows[0].cells[i]
+            cell.text = h
+            for p in cell.paragraphs:
+                for r in p.runs:
+                    r.bold = True
+                    r.font.size = Pt(9)
+
+        for idx, item in enumerate(content_results):
+            row = table.add_row()
+            row.cells[0].text = str(idx + 1)
+            row.cells[1].text = item.get("clause_text", "")
+            row.cells[2].text = _result_symbol(item.get("result", ""))
+            row.cells[3].text = f"{item.get('confidence', 0)}%"
+            row.cells[4].text = item.get("reason", "")
+            for p in row.cells[2].paragraphs:
+                for r in p.runs:
+                    r.font.color.rgb = _result_color(item.get("result", ""))
+                    r.font.size = Pt(8)
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    for r in p.runs:
+                        r.font.size = Pt(8)
+
+    doc.add_paragraph("─" * 60)
+    doc.add_paragraph()

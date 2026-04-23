@@ -141,6 +141,10 @@ def _fix_common_json_errors(text: str) -> str:
     # 修复单引号为双引号（仅在键值对场景）
     # 注意：只处理明显的 JSON key 单引号，避免误改内容
     text = re.sub(r"(?<=[\[{,])\s*'([^']+?)'\s*:", r' "\1":', text)
+    # 中文引号（“ " ” "）在 JSON 值内会破坏解析，替换为转义双引号
+    text = text.replace("“", '\\"').replace("”", '\\"')
+    # 中文单引号同理
+    text = text.replace("‘", "'").replace("’", "'")
     # 去除控制字符（LLM 偶尔输出 \x00-\x1f）
     text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
     return text
@@ -263,6 +267,7 @@ def _raw_api_call(messages: list[dict], settings: dict) -> str:
     api_cfg = settings["api"]
     base_url = api_cfg["base_url"].lower()
     is_ollama = "/v1" in base_url and "dashscope" not in base_url and "aliyuncs" not in base_url
+    is_dashscope = "dashscope" in base_url or "aliyuncs" in base_url
 
     if is_ollama:
         content = _ollama_dual_call(messages, api_cfg)
@@ -278,12 +283,17 @@ def _raw_api_call(messages: list[dict], settings: dict) -> str:
     kwargs: dict = dict(
         model=api_cfg["model"],
         messages=messages,
-        temperature=api_cfg.get("temperature", 0.1),
+        temperature=api_cfg.get("temperature", 0.4),
         max_tokens=api_cfg.get("max_output_tokens", 65536),
     )
     if api_cfg.get("enable_thinking") is not None:
-        kwargs["extra_body"] = {"enable_thinking": api_cfg["enable_thinking"]}
-    if api_cfg.get("response_format_json", True):
+        kwargs["extra_body"] = {"enable_thinking": bool(api_cfg["enable_thinking"])}
+    if api_cfg.get("enable_thinking") is True:
+        kwargs["stream"] = True
+    # DashScope qwen3.5 混合思考模型在 json_object 模式下会截断长列表输出，
+    # 规则提取等需返回长 JSON 数组的场景设 dashscope_no_json_format=True 跳过；
+    # 审核阶段返回短 JSON 对象，response_format 仍正常使用。
+    elif api_cfg.get("response_format_json", True) and not api_cfg.get("dashscope_no_json_format"):
         kwargs["response_format"] = {"type": "json_object"}
     try:
         response = client.chat.completions.create(**kwargs)
@@ -293,6 +303,16 @@ def _raw_api_call(messages: list[dict], settings: dict) -> str:
             response = client.chat.completions.create(**kwargs)
         else:
             raise
+    if kwargs.get("stream"):
+        parts = []
+        for chunk in response:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            piece = getattr(delta, "content", None)
+            if piece:
+                parts.append(piece)
+        return "".join(parts)
     return response.choices[0].message.content or ""
 
 
@@ -334,9 +354,10 @@ def _convert_multimodal_to_ollama_native(messages: list[dict]) -> list[dict]:
 def _ollama_dual_call(messages: list[dict], api_cfg: dict) -> str:
     """Ollama 双端点回退：先原生 API，后 OpenAI 兼容端点。
 
-    原生 /api/chat format:json 强制 JSON 输出，thinking 模型同时保留思考能力
-    （思考在 thinking 字段返回，content 为纯 JSON）。
-    如果原生 API 失败或 content 为空，回退到 OpenAI 兼容端点。
+    调用策略取决于 api_cfg.think：
+    - think=False：直接用原生 API format:json + think=False（快速）
+    - think=True：先用原生 API format:json + think=True（慢但保留思考），
+      失败时回退到 think=False 再试一次，最后回退 OpenAI 兼容端点。
 
     多模态消息（含图片）自动转换为 Ollama 原生格式：
     OpenAI content:[{image_url}] → Ollama content:"text" + images:[base64]
@@ -347,25 +368,53 @@ def _ollama_dual_call(messages: list[dict], api_cfg: dict) -> str:
     max_tokens = api_cfg.get("max_output_tokens", 65536)
     temperature = api_cfg.get("temperature", 0.1)
     timeout = api_cfg.get("timeout", 300)
+    want_think = api_cfg.get("think", True)
 
-    # Strategy 1: 原生 /api/chat — format:json 强制 JSON 输出
     # 将 OpenAI 多模态格式转换为 Ollama 原生格式（images 字段）
     native_messages = _convert_multimodal_to_ollama_native(messages)
-    payload = {
+
+    # Strategy 1: 原生 /api/chat — format:json
+    if want_think:
+        # 审查阶段：优先 think=True（保留思考能力）
+        payload = {
+            "model": model,
+            "messages": native_messages,
+            "stream": False,
+            "format": "json",
+            "think": True,
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+        try:
+            resp = _httpx.post(
+                f"{ollama_server.rstrip('/')}/api/chat",
+                json=payload, timeout=timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            msg = data.get("message", {})
+            content = msg.get("content", "")
+            if content.strip():
+                return content
+            thinking = msg.get("thinking", "")
+            if thinking.strip():
+                logger.info("Ollama native API: content empty, using thinking field")
+                return thinking
+        except Exception as e:
+            logger.warning("Ollama native API (think=True) failed (%s), trying think=False", e)
+
+    # think=False 或 think=True 回退：原生 API format:json + think=False（快速）
+    payload_no_think = {
         "model": model,
         "messages": native_messages,
         "stream": False,
         "format": "json",
+        "think": False,
         "options": {"temperature": temperature, "num_predict": max_tokens},
     }
-    want_think = api_cfg.get("think", True)
-    if want_think:
-        payload["think"] = True
-
     try:
         resp = _httpx.post(
             f"{ollama_server.rstrip('/')}/api/chat",
-            json=payload, timeout=timeout,
+            json=payload_no_think, timeout=timeout,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -373,13 +422,8 @@ def _ollama_dual_call(messages: list[dict], api_cfg: dict) -> str:
         content = msg.get("content", "")
         if content.strip():
             return content
-        # content 为空但有 thinking — 某些模型可能只输出思考内容
-        thinking = msg.get("thinking", "")
-        if thinking.strip():
-            logger.info("Ollama native API: content empty, using thinking field")
-            return thinking
     except Exception as e:
-        logger.warning("Ollama native API failed (%s), falling back to OpenAI endpoint", e)
+        logger.warning("Ollama native API (think=False) failed (%s), falling back to OpenAI endpoint", e)
 
     # Strategy 2: OpenAI 兼容 /v1/chat/completions
     # think=False + response_format:json_object — 对 gemma4 有效
@@ -506,6 +550,43 @@ def batch_paragraphs(
     if current_batch:
         batches.append(current_batch)
 
+    return batches
+
+
+def batch_by_count(
+    paragraphs: list[TaggedParagraph],
+    batch_size: int = 40,
+    token_safety_cap: int = 100_000,
+) -> list[list[TaggedParagraph]]:
+    """按段落数切批，token 超过安全上限时提前切。
+
+    与 batch_paragraphs 的区别：主轴是段落数，token 仅做保底。
+    适用于已经被关键词过滤后的场景（段落数本身不大）。
+
+    单条段落本身超 token_safety_cap 时独占一批，避免死循环。
+    """
+    if not paragraphs:
+        return []
+
+    batches: list[list[TaggedParagraph]] = []
+    current: list[TaggedParagraph] = []
+    current_tokens = 0
+
+    for para in paragraphs:
+        para_tokens = estimate_tokens(para.text)
+        hits_count = len(current) >= batch_size
+        hits_token = bool(current) and current_tokens + para_tokens > token_safety_cap
+
+        if hits_count or hits_token:
+            batches.append(current)
+            current = [para]
+            current_tokens = para_tokens
+        else:
+            current.append(para)
+            current_tokens += para_tokens
+
+    if current:
+        batches.append(current)
     return batches
 
 

@@ -14,7 +14,7 @@ describe('PreviewStage', () => {
       props: { taskId: 'task-1', filename: 'test.docx' },
     })
     expect(wrapper.text()).toContain('分析报告')
-    expect(wrapper.text()).toContain('投标文件格式')
+    expect(wrapper.text()).toContain('投标文件大纲')
     expect(wrapper.text()).toContain('资料清单')
   })
 

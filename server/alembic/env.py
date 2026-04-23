@@ -12,6 +12,7 @@ from server.app.config import settings
 from server.app.database import Base
 from server.app.models import User, Task, TaskFile, Annotation, GeneratedFile  # noqa: F401
 from server.app.models.review_task import ReviewTask  # noqa: F401
+from server.app.models.anbiao_review import AnbiaoReview  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:
