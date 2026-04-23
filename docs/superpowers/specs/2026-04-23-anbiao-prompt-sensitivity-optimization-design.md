@@ -125,11 +125,19 @@
 
 | 批次候选结果 | 最终 result |
 |---|---|
-| 存在 severity=fail | `fail` |
-| 无 fail 但存在 severity=suspect | `warning`（提醒人工核查） |
+| 存在候选 severity=fail | `fail` |
+| 无 fail 但存在候选 severity=suspect | `warning`（提醒人工核查） |
 | 全部 pass / 无候选 | `pass` |
 
 advisory 规则的候选项一律落到 `suspect`，不会升级为 `fail`。
+
+**术语约定**：本方案涉及两套字段，避免实现时混淆：
+
+- `candidate.severity` ∈ `{fail, suspect}`：**候选级**，由 LLM 按 4.3/4.4 判定。
+- `result` ∈ `{pass, fail, warning}`：**最终结论**，由 conclude 按上表从候选聚合得出。
+- `AnbiaoRuleResult.severity` ∈ `{critical, minor}`：**规则级严重度**，由候选聚合得出（见 5.2），与 `rule.is_mandatory` 无直接一一对应关系（advisory 强制 minor 封顶；mandatory 若全部候选为 suspect 也应输出 minor）。
+
+conclude prompt 的 summary 字段保留现状输出（不删除，但不作为判定依据）。
 
 ## 5. 代码改动范围
 
@@ -148,7 +156,7 @@ advisory 规则的候选项一律落到 `suspect`，不会升级为 `fail`。
 
 ### 5.2 Python 后端
 
-- [src/reviewer/anbiao_reviewer.py:201-205](../../../src/reviewer/anbiao_reviewer.py#L201) `_format_candidates_for_conclude`：透传 `severity`、`identification_path` 到 conclude 提示词。
+- [src/reviewer/anbiao_reviewer.py:196-212](../../../src/reviewer/anbiao_reviewer.py#L196) `_format_chapter_results`：在格式化每个候选项时透传 `severity` 与 `identification_path` 到 conclude 提示词输入文本（例如："- 段落{N} [{severity}]: {reason} | 路径: {identification_path}"）。
 - [src/reviewer/anbiao_reviewer.py:533](../../../src/reviewer/anbiao_reviewer.py#L533) 与 [:565](../../../src/reviewer/anbiao_reviewer.py#L565) 最终 severity 聚合：
   - 由"按规则 `is_mandatory` 一刀切"改为按候选项聚合：存在 `fail` → critical；全为 `suspect` → minor；无候选 → pass。
   - advisory 规则强制 minor 封顶，不允许升级为 critical。
@@ -156,14 +164,17 @@ advisory 规则的候选项一律落到 `suspect`，不会升级为 `fail`。
 
 ### 5.3 数据模型
 
-- 在 [src/models.py](../../../src/models.py) 中（如有对应 pydantic 定义）为候选项/location 新增可选字段：
-  - `severity: Literal["fail", "suspect"] | None`
-  - `identification_path: str | None`
-- 数据库层暂不新增列；前端从新字段读取即可（字段为可选，兼容历史记录）。
+当前暗标候选项在 `anbiao_reviewer.py` 中以 `dict` 形式流转，`src/models.py` 中**无**对应的 pydantic 模型（已确认）。本方案采取**最小侵入**方案：
 
-### 5.4 前端（可选）
+- **候选项**：保持 dict 形式，新增键 `severity`、`identification_path`、`rule_category`，均为可选字符串，契约在提示词与 `_format_chapter_results` 中对齐，不新增 pydantic 模型。
+- **`tender_locations`**：若 [src/models.py](../../../src/models.py) 存在对应模型，添加可选字段 `severity: Literal["fail", "suspect"] | None`；若仍为 dict，则仅约定键名。实现阶段按实际情况选择。
+- 数据库层不新增列；历史记录无新字段时前端按"未知等级"回退显示。
 
-- [web/src/components/AnbiaoPreviewStage.vue](../../../web/src/components/AnbiaoPreviewStage.vue) 对 fail 与 suspect 使用不同颜色/图标（红 vs 黄）。不做不影响功能。
+`rule_category` 取值约定为 4.2 中的六类字符串（`身份信息` / `客户名称` / `我司自研产品` / `第三方主体` / `图片证书` / `业绩案例`），非必填，由 LLM 输出作为可读性辅助，不参与后端逻辑分支。
+
+### 5.4 前端（本次范围外）
+
+前端双色展示（fail 红 / suspect 黄）**不在本次实现范围**，留作后续独立任务。本次只保证后端字段透出到 API 响应即可（字段可选，前端不读不影响渲染）。
 
 ### 5.5 兼容性
 
@@ -190,12 +201,12 @@ advisory 规则的候选项一律落到 `suspect`，不会升级为 `fail`。
 
 ### 6.3 手动 diff 对比
 
-在真实标书样本上跑新旧提示词，人工对比候选数差异与误报率，形成评估报告（非 CI 门槛，仅发布前一次性验证）。
+在真实标书样本（至少 3 份历史已审核标书）上跑新旧提示词，人工对比候选数差异与误报率。粗略目标：**A–G 误报场景在样本中的误报数量下降 ≥ 70%，且无新增漏报**。仅作为发布前一次性验证，非 CI 门槛。
 
 ## 7. 风险与缓解
 
 - **召回下降**：强化"可识别性"可能使某些边界违规被漏报。缓解：6.1 的回归用例只测误报，不测召回；召回由 6.2 的既有正例保障；上线前 6.3 手动 diff 可发现明显漏报。
-- **模型不遵守 `identification_path` 强制**：模型可能伪造路径以绕过。缓解：提示词中明确"写不出具体路径则不得标注"并给出反例；后续可在后处理阶段检测 `identification_path` 是否包含"可能/或许/建议"等禁用词并自动降级为 pass。
+- **模型不遵守 `identification_path` 强制**：模型可能伪造路径以绕过。缓解：提示词中明确"写不出具体路径则不得标注"并给出反例。后处理阶段的禁用词检测（自动将含"可能/或许/建议"的候选降级为 pass）**留作后续优化**，本次不实现。
 - **advisory 规则输出混乱**：若模型忽略"advisory 只能 suspect"规则输出了 fail，conclude 阶段会错误升级。缓解：Python 后端在聚合时对 advisory 规则强制 minor 封顶（5.2 已覆盖）。
 
 ## 8. 交付物清单
