@@ -638,3 +638,37 @@ def test_format_chapter_results_omits_missing_fields_gracefully():
     text = _format_chapter_results(chapter_results)
     assert "段落3" in text
     assert "历史记录无新字段" in text
+
+
+def test_compute_rule_severity_fail_candidate_is_critical():
+    from src.reviewer.anbiao_reviewer import _compute_rule_severity
+    candidates = [{"severity": "fail"}, {"severity": "suspect"}]
+    assert _compute_rule_severity(candidates, is_mandatory=True) == "critical"
+
+
+def test_compute_rule_severity_all_suspect_is_minor():
+    from src.reviewer.anbiao_reviewer import _compute_rule_severity
+    candidates = [{"severity": "suspect"}, {"severity": "suspect"}]
+    assert _compute_rule_severity(candidates, is_mandatory=True) == "minor"
+
+
+def test_compute_rule_severity_advisory_capped_at_minor():
+    """advisory 规则即使收到 fail 候选也封顶 minor。"""
+    from src.reviewer.anbiao_reviewer import _compute_rule_severity
+    candidates = [{"severity": "fail"}]
+    assert _compute_rule_severity(candidates, is_mandatory=False) == "minor"
+
+
+def test_compute_rule_severity_no_candidates_falls_back_to_rule_default():
+    """无候选项时按规则默认：mandatory→critical，advisory→minor。"""
+    from src.reviewer.anbiao_reviewer import _compute_rule_severity
+    assert _compute_rule_severity([], is_mandatory=True) == "critical"
+    assert _compute_rule_severity([], is_mandatory=False) == "minor"
+
+
+def test_compute_rule_severity_legacy_candidates_without_severity_field():
+    """历史候选无 severity 字段 → 回退按 is_mandatory。"""
+    from src.reviewer.anbiao_reviewer import _compute_rule_severity
+    candidates = [{"para_index": 1, "reason": "old"}]
+    assert _compute_rule_severity(candidates, is_mandatory=True) == "critical"
+    assert _compute_rule_severity(candidates, is_mandatory=False) == "minor"

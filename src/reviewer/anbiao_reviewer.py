@@ -220,6 +220,30 @@ def _format_chapter_results(chapter_results: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _compute_rule_severity(candidates: list[dict], is_mandatory: bool) -> str:
+    """按候选项 severity 聚合规则级严重度。
+
+    - advisory 规则：一律封顶 minor（即使模型错误输出 fail 候选也不升级）。
+    - mandatory 规则：
+      - 任一候选 severity==fail → critical
+      - 全部 suspect → minor
+      - 无候选 → critical（规则默认）
+      - 候选无 severity 字段（历史数据）→ 按 is_mandatory 回退（保持旧行为）
+    """
+    if not is_mandatory:
+        return "minor"
+    if not candidates:
+        return "critical"
+    has_severity_field = any("severity" in c for c in candidates if isinstance(c, dict))
+    if not has_severity_field:
+        return "critical"
+    has_fail = any(
+        isinstance(c, dict) and c.get("severity") == "fail"
+        for c in candidates
+    )
+    return "critical" if has_fail else "minor"
+
+
 def _split_batch_by_image_limit(batch: ChapterBatch) -> list[ChapterBatch]:
     """将图片超限的 ChapterBatch 拆分为多个子批次，每批次不超过 _MAX_IMAGES_PER_SUB_BATCH 张图片。
 
@@ -538,7 +562,7 @@ def review_content_rules(
                 "result": result_val,
                 "confidence": confidence,
                 "reason": reason,
-                "severity": "critical" if rule.is_mandatory else "minor",
+                "severity": _compute_rule_severity(all_candidates, rule.is_mandatory),
                 "is_mandatory": rule.is_mandatory,
                 "tender_locations": [],
             })
@@ -554,12 +578,22 @@ def review_content_rules(
         else:
             para_indices = [c["para_index"] for c in all_candidates]
             per_para_reasons = {c["para_index"]: c.get("reason", "") for c in all_candidates}
+            per_para_severity = {
+                c["para_index"]: c.get("severity")
+                for c in all_candidates if c.get("severity")
+            }
+            per_para_path = {
+                c["para_index"]: c.get("identification_path")
+                for c in all_candidates if c.get("identification_path")
+            }
             tender_locations = [{
                 "batch_id": "all_candidates",
                 "path": "accumulated",
                 "global_para_indices": para_indices,
                 "text_snippet": all_candidates[0].get("text_snippet", "") if all_candidates else "",
                 "per_para_reasons": per_para_reasons,
+                "per_para_severity": per_para_severity,
+                "per_para_identification_path": per_para_path,
             }] if all_candidates else []
 
         all_results.append({
@@ -570,7 +604,7 @@ def review_content_rules(
             "result": result_val,
             "confidence": int(llm_result.get("confidence", 0)),
             "reason": llm_result.get("reason", ""),
-            "severity": "critical" if rule.is_mandatory else "minor",
+            "severity": _compute_rule_severity(all_candidates, rule.is_mandatory),
             "is_mandatory": rule.is_mandatory,
             "tender_locations": tender_locations,
         })
