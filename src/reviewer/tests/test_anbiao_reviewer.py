@@ -172,74 +172,47 @@ def test_split_chapter_oversized_single_sub_sends_whole():
     assert batches[0].chapter_title == "C/Huge"
 
 
-def test_build_chapter_batches_no_chapters_fallback():
-    """无 chapters → 走兜底，chapter_title 为 "段落批次 N"。"""
+def test_build_chapter_batches_cloud_mode_50_paras():
+    """云端模式：50段落一批次。"""
     from src.reviewer.anbiao_reviewer import _build_chapter_batches
-    paras = _make_paras([f"p{i}" for i in range(60)])
-    tender_index = {"chapters": []}
-    api_settings = {"api": {"context_length": 32000, "max_output_tokens": 8000}}
+    paras = _make_paras([f"p{i}" for i in range(120)])
     batches = _build_chapter_batches(
-        paras, tender_index, is_local_mode=False,
-        api_settings=api_settings, extracted_images=[],
-        image_map={"k.png": "/tmp/k.png"},
+        paras, is_local_mode=False, extracted_images=[], image_map=None,
     )
-    assert len(batches) == 2
-    assert batches[0].chapter_title.startswith("段落批次")
-    assert batches[0].image_map == {"k.png": "/tmp/k.png"}
+    assert len(batches) == 3  # 120 / 50 = 3 batches (50+50+20)
+    assert batches[0].chapter_title == "段落批次 1"
+    assert len(batches[0].para_indices) == 50
+    assert len(batches[2].para_indices) == 20
 
 
-def test_build_chapter_batches_local_mode_uses_leaves():
-    """本地模式：每个叶子节点一批。"""
+def test_build_chapter_batches_local_mode_30_paras():
+    """本地模式：30段落一批次。"""
     from src.reviewer.anbiao_reviewer import _build_chapter_batches
-    paras = _make_paras(["p0", "p1", "p2", "p3"])
-    tender_index = {"chapters": [
-        {"title": "C1", "level": 1, "start_para": 0, "end_para": 3, "children": [
-            {"title": "C1.1", "level": 2, "start_para": 0, "end_para": 1, "children": []},
-            {"title": "C1.2", "level": 2, "start_para": 2, "end_para": 3, "children": []},
-        ]},
-    ]}
-    api_settings = {"api": {"context_length": 16000, "max_output_tokens": 4000}}
+    paras = _make_paras([f"p{i}" for i in range(65)])
     batches = _build_chapter_batches(
-        paras, tender_index, is_local_mode=True,
-        api_settings=api_settings, extracted_images=[], image_map=None,
+        paras, is_local_mode=True, extracted_images=[], image_map=None,
     )
-    assert [b.chapter_title for b in batches] == ["C1.1", "C1.2"]
-    assert batches[0].para_indices == [0, 1]
-    assert batches[1].para_indices == [2, 3]
+    assert len(batches) == 3  # 65 / 30 = 3 batches (30+30+5)
+    assert batches[0].chapter_title == "段落批次 1"
+    assert len(batches[0].para_indices) == 30
+    assert len(batches[2].para_indices) == 5
 
 
-def test_build_chapter_batches_cloud_mode_one_batch_per_l1():
-    """云端模式：未超限时每个一级标题一批（含所有子章节）。"""
+def test_build_chapter_batches_with_images():
+    """图片按段落范围精确分配到对应批次。"""
     from src.reviewer.anbiao_reviewer import _build_chapter_batches
-    paras = _make_paras(["a", "b", "c", "d"])
-    tender_index = {"chapters": [
-        {"title": "C1", "level": 1, "start_para": 0, "end_para": 1, "children": [
-            {"title": "C1.1", "level": 2, "start_para": 0, "end_para": 1, "children": []},
-        ]},
-        {"title": "C2", "level": 1, "start_para": 2, "end_para": 3, "children": []},
-    ]}
-    api_settings = {"api": {"context_length": 200000, "max_output_tokens": 4000}}
+    paras = _make_paras([f"p{i}" for i in range(100)])
+    images = [
+        {"filename": "a.png", "path": "/tmp/a.png", "near_para_indices": [25]},
+        {"filename": "b.png", "path": "/tmp/b.png", "near_para_indices": [75]},
+    ]
     batches = _build_chapter_batches(
-        paras, tender_index, is_local_mode=False,
-        api_settings=api_settings, extracted_images=[], image_map=None,
+        paras, is_local_mode=False, extracted_images=images, image_map=None,
     )
-    assert [b.chapter_title for b in batches] == ["C1", "C2"]
-
-
-def test_build_chapter_batches_local_skips_empty_leaves():
-    """start_para > end_para 或无段落命中的叶子不产出批次。"""
-    from src.reviewer.anbiao_reviewer import _build_chapter_batches
-    paras = _make_paras(["p0"])
-    tender_index = {"chapters": [
-        {"title": "Empty", "level": 1, "start_para": 5, "end_para": 10, "children": []},
-        {"title": "C", "level": 1, "start_para": 0, "end_para": 0, "children": []},
-    ]}
-    api_settings = {"api": {"context_length": 16000, "max_output_tokens": 4000}}
-    batches = _build_chapter_batches(
-        paras, tender_index, is_local_mode=True,
-        api_settings=api_settings, extracted_images=[], image_map=None,
-    )
-    assert [b.chapter_title for b in batches] == ["C"]
+    # 段落25在批次1 (0-49), 段落75在批次2 (50-99)
+    assert "a.png" in batches[0].image_map
+    assert "a.png" not in batches[1].image_map
+    assert "b.png" in batches[1].image_map
 
 
 def test_format_chapter_results_includes_candidates_and_summary():
@@ -286,15 +259,88 @@ def _empty_doc_format():
     return DocumentFormat(sections=[])
 
 
+def test_review_content_rules_conclude_does_not_filter_candidates(monkeypatch):
+    """conclude 只给总体判定，不再筛选 candidates；所有批次 candidates 全部采纳为 tender_locations。"""
+    from src.reviewer import anbiao_reviewer as mod
+
+    paras = _make_paras(["p0", "p1", "p2"])
+    rule = _make_rule()
+
+    call_counter = {"n": 0}
+
+    def fake_call_qwen(messages, api_settings):
+        call_counter["n"] += 1
+        if call_counter["n"] == 1:
+            # 批次审核：发现 2 个候选
+            return {
+                "candidates": [
+                    {"para_index": 0, "text_snippet": "Goldpac", "reason": "公司名"},
+                    {"para_index": 2, "text_snippet": "logo", "reason": "Logo暴露"},
+                ],
+                "summary": "2处违规",
+            }
+        # 综合判定：只返回 result/confidence/reason，不再返回 locations/retained_candidates
+        return {"result": "fail", "confidence": 85, "reason": "多处泄露公司信息"}
+
+    monkeypatch.setattr(mod, "call_qwen", fake_call_qwen)
+
+    results = mod.review_content_rules(
+        rules=[rule],
+        paragraphs=paras,
+        tender_index={},
+        extracted_images=[],
+        doc_format=_empty_doc_format(),
+        api_settings={"api": {"context_length": 32000, "max_output_tokens": 8000}},
+        is_local_mode=True,
+    )
+    assert results[0]["result"] == "fail"
+    assert results[0]["confidence"] == 85
+    assert "泄露" in results[0]["reason"]
+    # 关键：所有 candidates 全部采纳，不被 conclude 筛选
+    locs = results[0]["tender_locations"]
+    assert len(locs) == 1
+    assert locs[0]["batch_id"] == "all_candidates"
+    assert 0 in locs[0]["global_para_indices"]
+    assert 2 in locs[0]["global_para_indices"]
+    assert locs[0]["per_para_reasons"][0] == "公司名"
+    assert locs[0]["per_para_reasons"][2] == "Logo暴露"
+
+
+def test_review_content_rules_pass_result_empty_tender_locations(monkeypatch):
+    """conclude 判定 pass → tender_locations 为空（即使批次有候选）。"""
+    from src.reviewer import anbiao_reviewer as mod
+
+    paras = _make_paras(["p0", "p1"])
+    rule = _make_rule()
+
+    call_counter = {"n": 0}
+
+    def fake_call_qwen(messages, api_settings):
+        call_counter["n"] += 1
+        if call_counter["n"] == 1:
+            return {"candidates": [{"para_index": 0, "text_snippet": "xx", "reason": "疑似"}], "summary": ""}
+        return {"result": "pass", "confidence": 90, "reason": "经综合判定无违规"}
+
+    monkeypatch.setattr(mod, "call_qwen", fake_call_qwen)
+
+    results = mod.review_content_rules(
+        rules=[rule],
+        paragraphs=paras,
+        tender_index={},
+        extracted_images=[],
+        doc_format=_empty_doc_format(),
+        api_settings={"api": {"context_length": 32000, "max_output_tokens": 8000}},
+        is_local_mode=True,
+    )
+    assert results[0]["result"] == "pass"
+    assert results[0]["tender_locations"] == []
+
+
 def test_review_content_rules_multi_chapter_conclude(monkeypatch):
-    """多章节：每章节审核 + 1 次综合判定；总调用次数 = 章节数 + 1。"""
+    """4个段落本地模式只有1个批次，+1次综合判定 = 2次调用。"""
     from src.reviewer import anbiao_reviewer as mod
 
     paras = _make_paras(["p0", "p1", "p2", "p3"])
-    tender_index = {"chapters": [
-        {"title": "C1", "level": 1, "start_para": 0, "end_para": 1, "children": []},
-        {"title": "C2", "level": 1, "start_para": 2, "end_para": 3, "children": []},
-    ]}
     rule = _make_rule()
 
     call_log = []
@@ -302,16 +348,12 @@ def test_review_content_rules_multi_chapter_conclude(monkeypatch):
     def fake_call_qwen(messages, api_settings):
         call_log.append(messages)
         call_idx = len(call_log)
-        if call_idx <= 2:
-            if call_idx == 1:
-                return {"candidates": [{"para_index": 0, "text_snippet": "X公司", "reason": "公司名"}], "summary": "1处违规"}
-            return {"candidates": [], "summary": ""}
+        if call_idx == 1:
+            return {"candidates": [{"para_index": 0, "text_snippet": "X公司", "reason": "公司名"}], "summary": "1处违规"}
         return {
             "result": "fail",
             "confidence": 90,
-            "reason": "C1 段落 0 泄露公司名",
-            "locations": [{"para_index": 0, "text_snippet": "X公司", "reason": "公司名", "chapter_title": "C1"}],
-            "retained_candidates": [0],
+            "reason": "段落 0 泄露公司名",
         }
 
     monkeypatch.setattr(mod, "call_qwen", fake_call_qwen)
@@ -319,16 +361,17 @@ def test_review_content_rules_multi_chapter_conclude(monkeypatch):
     results = mod.review_content_rules(
         rules=[rule],
         paragraphs=paras,
-        tender_index=tender_index,
+        tender_index={},
         extracted_images=[],
         doc_format=_empty_doc_format(),
         api_settings={"api": {"context_length": 32000, "max_output_tokens": 8000}},
         is_local_mode=True,
     )
-    assert len(call_log) == 3
+    assert len(call_log) == 2
     assert len(results) == 1
     assert results[0]["result"] == "fail"
     assert results[0]["tender_locations"]
+    assert 0 in results[0]["tender_locations"][0]["global_para_indices"]
 
 
 def test_review_content_rules_advisory_downgrade(monkeypatch):
@@ -347,7 +390,7 @@ def test_review_content_rules_advisory_downgrade(monkeypatch):
         call_counter["n"] += 1
         if call_counter["n"] == 1:
             return {"candidates": [], "summary": ""}
-        return {"result": "fail", "confidence": 70, "reason": "有图", "locations": [], "retained_candidates": []}
+        return {"result": "fail", "confidence": 70, "reason": "有图"}
 
     monkeypatch.setattr(mod, "call_qwen", fake_call_qwen)
 
@@ -407,7 +450,7 @@ def test_review_content_rules_no_chapters_fallback(monkeypatch):
     def fake_call_qwen(messages, api_settings):
         call_log.append(1)
         if len(call_log) == 2:
-            return {"result": "pass", "confidence": 90, "reason": "无", "locations": [], "retained_candidates": []}
+            return {"result": "pass", "confidence": 90, "reason": "无"}
         return {"candidates": [], "summary": ""}
 
     monkeypatch.setattr(mod, "call_qwen", fake_call_qwen)
@@ -420,3 +463,178 @@ def test_review_content_rules_no_chapters_fallback(monkeypatch):
     )
     assert len(call_log) == 2
     assert results[0]["result"] == "pass"
+
+
+# ========== 表格内容格式化测试 ==========
+
+
+def test_paragraphs_to_text_with_table():
+    """表格段落展开为完整表格内容。"""
+    from src.reviewer.tender_indexer import paragraphs_to_text
+    paras = [
+        Paragraph(index=0, text="普通段落"),
+        Paragraph(index=1, text="表头A | 表头B", is_table=True, table_data=[
+            ["表头A", "表头B"],
+            ["数据1", "数据2"],
+        ]),
+        Paragraph(index=2, text="后续段落"),
+    ]
+    text = paragraphs_to_text(paras)
+    assert "[0] 普通段落" in text
+    assert "[1] 【表格】" in text
+    assert "行0: 表头A | 表头B" in text
+    assert "行1: 数据1 | 数据2" in text
+    assert "[/1]" in text
+    assert "[2] 后续段落" in text
+
+
+def test_paragraphs_to_text_plain_only():
+    """纯文本段落（无表格）正常输出。"""
+    from src.reviewer.tender_indexer import paragraphs_to_text
+    paras = _make_paras(["a", "b", "c"])
+    text = paragraphs_to_text(paras)
+    assert text == "[0] a\n[1] b\n[2] c"
+
+
+def test_paragraphs_to_text_table_without_data():
+    """is_table=True 但 table_data=None 时按普通段落输出。"""
+    from src.reviewer.tender_indexer import paragraphs_to_text
+    paras = [Paragraph(index=0, text="摘要", is_table=True, table_data=None)]
+    text = paragraphs_to_text(paras)
+    assert text == "[0] 摘要"
+
+
+# ========== 图片分批次拆分测试 ==========
+
+
+def test_split_batch_by_image_limit_no_split_needed():
+    """图片不超过6张时不拆分。"""
+    from src.reviewer.anbiao_reviewer import ChapterBatch, _split_batch_by_image_limit
+    img_map = {f"img{i}.png": f"/tmp/img{i}.png" for i in range(4)}
+    batch = ChapterBatch(
+        text="[0] text\n[1] [图片: img0.png] [图片: img1.png]\n[2] [图片: img2.png]\n[3] [图片: img3.png]",
+        para_indices=[0, 1, 2, 3],
+        chapter_title="T",
+        image_map=img_map,
+    )
+    result = _split_batch_by_image_limit(batch)
+    assert len(result) == 1
+    assert result[0] == batch
+
+
+def test_split_batch_by_image_limit_splits_at_6():
+    """8张图片拆为2个子批次：前6 + 后2。"""
+    from src.reviewer.anbiao_reviewer import ChapterBatch, _split_batch_by_image_limit
+    img_map = {f"img{i}.png": f"/tmp/img{i}.png" for i in range(8)}
+    text_lines = [
+        "[0] 无图前导",
+        "[1] [图片: img0.png] [图片: img1.png] [图片: img2.png]",
+        "[2] [图片: img3.png]",
+        "[3] [图片: img4.png] [图片: img5.png]",
+        "[4] [图片: img6.png]",
+        "[5] [图片: img7.png]",
+        "[6] 尾部无图",
+    ]
+    batch = ChapterBatch(
+        text="\n".join(text_lines),
+        para_indices=[0, 1, 2, 3, 4, 5, 6],
+        chapter_title="T",
+        image_map=img_map,
+    )
+    result = _split_batch_by_image_limit(batch)
+    assert len(result) == 2
+    # 第一个子批次包含 [0]-[3]，有 img0-img5（6张）
+    sub1 = result[0]
+    assert 0 in sub1.para_indices
+    assert 3 in sub1.para_indices
+    assert len(sub1.image_map) == 6
+    assert "img0.png" in sub1.image_map
+    assert "img5.png" in sub1.image_map
+    # 第二个子批次包含 [4]-[6]，有 img6-img7（2张）
+    sub2 = result[1]
+    assert 4 in sub2.para_indices
+    assert 6 in sub2.para_indices
+    assert len(sub2.image_map) == 2
+    assert "img6.png" in sub2.image_map
+
+
+def test_split_batch_by_image_limit_12_images_3_batches():
+    """12张图片拆为3个子批次：6+6。"""
+    from src.reviewer.anbiao_reviewer import ChapterBatch, _split_batch_by_image_limit
+    img_map = {f"img{i}.png": f"/tmp/img{i}.png" for i in range(12)}
+    text_lines = [f"[{i}] [图片: img{i}.png]" for i in range(12)]
+    batch = ChapterBatch(
+        text="\n".join(text_lines),
+        para_indices=list(range(12)),
+        chapter_title="T",
+        image_map=img_map,
+    )
+    result = _split_batch_by_image_limit(batch)
+    assert len(result) == 2
+    assert len(result[0].image_map) == 6
+    assert len(result[1].image_map) == 6
+
+
+def test_split_batch_by_image_limit_preserves_text_order():
+    """拆分后每个子批次的文本保持段落顺序。"""
+    from src.reviewer.anbiao_reviewer import ChapterBatch, _split_batch_by_image_limit
+    img_map = {f"img{i}.png": f"/tmp/img{i}.png" for i in range(8)}
+    text_lines = [
+        "[0] 前导段落A",
+        "[1] 前导段落B",
+        "[2] [图片: img0.png]",
+        "[3] [图片: img1.png]",
+        "[4] [图片: img2.png]",
+        "[5] [图片: img3.png]",
+        "[6] [图片: img4.png]",
+        "[7] [图片: img5.png]",
+        "[8] [图片: img6.png]",
+        "[9] [图片: img7.png]",
+        "[10] 尾部段落",
+    ]
+    batch = ChapterBatch(
+        text="\n".join(text_lines),
+        para_indices=list(range(11)),
+        chapter_title="T",
+        image_map=img_map,
+    )
+    result = _split_batch_by_image_limit(batch)
+    assert len(result) == 2
+    # 子批次1：[0]-[7]，含 img0-img5
+    assert result[0].text.startswith("[0] 前导段落A")
+    assert "[7]" in result[0].text
+    assert "[8]" not in result[0].text
+    # 子批次2：[8]-[10]，含 img6-img7
+    assert result[1].text.startswith("[8]")
+    assert "[10] 尾部段落" in result[1].text
+
+
+def test_format_chapter_results_passes_severity_and_path():
+    from src.reviewer.anbiao_reviewer import _format_chapter_results
+    chapter_results = [{
+        "chapter_title": "第一章",
+        "candidates": [{
+            "para_index": 5,
+            "severity": "suspect",
+            "identification_path": "从证书编号可反查到公司",
+            "reason": "证书编号可识别",
+        }],
+        "summary": "发现1处可疑",
+    }]
+    text = _format_chapter_results(chapter_results)
+    assert "[suspect]" in text
+    assert "从证书编号可反查到公司" in text
+    assert "段落5" in text
+    assert "证书编号可识别" in text
+
+
+def test_format_chapter_results_omits_missing_fields_gracefully():
+    from src.reviewer.anbiao_reviewer import _format_chapter_results
+    chapter_results = [{
+        "chapter_title": "第二章",
+        "candidates": [{"para_index": 3, "reason": "历史记录无新字段"}],
+        "summary": "",
+    }]
+    text = _format_chapter_results(chapter_results)
+    assert "段落3" in text
+    assert "历史记录无新字段" in text

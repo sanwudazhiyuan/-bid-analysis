@@ -1,5 +1,6 @@
 """暗标审查引擎：格式规则审查 + 内容规则审查。"""
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,8 @@ class ChapterBatch:
 _FORMAT_PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" / "anbiao_format_review.txt"
 _CONTENT_PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" / "anbiao_content_review.txt"
 _CONTENT_CONCLUDE_PROMPT_PATH = Path(__file__).parent.parent.parent / "config" / "prompts" / "anbiao_content_review_conclude.txt"
+
+_MAX_IMAGES_PER_SUB_BATCH = 6
 
 
 def _collect_leaf_chapters(chapters: list[dict], max_level: int = 3) -> list[dict]:
@@ -89,22 +92,29 @@ def _build_batch_from_node(
 def _build_fallback_batches(
     paragraphs: list,
     image_map: dict[str, str] | None,
+    extracted_images: list[dict] | None = None,
     batch_size: int = 50,
 ) -> list[ChapterBatch]:
     """无章节索引时按段落数分批，chapter_title 为 "段落批次 N"。
 
-    兜底模式不按章节拆分图片，所有批次共享传入的完整 image_map。
+    优先用 extracted_images + _filter_images_for_batch 按段落范围精确分配图片；
+    仅当 extracted_images 不可用时，共享传入的完整 image_map。
     """
+    from src.reviewer.tender_indexer import paragraphs_to_text
     batches: list[ChapterBatch] = []
     for i in range(0, len(paragraphs), batch_size):
         batch_paras = paragraphs[i:i + batch_size]
-        text = "\n".join(f"[{p.index}] {p.text}" for p in batch_paras)
+        text = paragraphs_to_text(batch_paras)
         indices = [p.index for p in batch_paras]
+        if extracted_images:
+            img = _filter_images_for_batch(indices, extracted_images)
+        else:
+            img = dict(image_map) if image_map else {}
         batches.append(ChapterBatch(
             text=text,
             para_indices=indices,
             chapter_title=f"段落批次 {i // batch_size + 1}",
-            image_map=dict(image_map) if image_map else {},
+            image_map=img,
         ))
     return batches
 
@@ -174,50 +184,13 @@ def _split_chapter_at_sub_sections(
 
 def _build_chapter_batches(
     paragraphs: list,
-    tender_index: dict,
     is_local_mode: bool,
-    api_settings: dict,
     extracted_images: list[dict],
     image_map: dict[str, str] | None,
 ) -> list[ChapterBatch]:
-    """总编排：根据模式与章节结构产出 ChapterBatch 列表。
-
-    - 无 chapters → _build_fallback_batches
-    - 本地模式 → 叶子节点（≤level 3）逐一成批，超限时 _split_chapter_at_sub_sections
-    - 云端模式 → 一级标题整章成批（max_chars 取 2×），超限时 _split_chapter_at_sub_sections
-    """
-    from src.reviewer.tender_indexer import get_max_chars_per_batch, paragraphs_to_text
-
-    chapters = tender_index.get("chapters", [])
-    if not chapters:
-        return _build_fallback_batches(paragraphs, image_map, batch_size=50)
-
-    base_max = get_max_chars_per_batch(api_settings)
-    max_chars = base_max if is_local_mode else base_max * 2
-
-    if is_local_mode:
-        nodes = _collect_leaf_chapters(chapters, max_level=3)
-    else:
-        nodes = chapters
-
-    batches: list[ChapterBatch] = []
-    for node in nodes:
-        start = node.get("start_para", 0)
-        end = node.get("end_para", -1)
-        paras_in_node = [p for p in paragraphs if start <= p.index <= end]
-        if not paras_in_node:
-            continue
-
-        node_text = paragraphs_to_text(paras_in_node)
-        if len(node_text) <= max_chars:
-            batches.append(_build_batch_from_node(node, paragraphs, extracted_images, node["title"]))
-        else:
-            batches.extend(_split_chapter_at_sub_sections(node, paragraphs, extracted_images, max_chars))
-
-    if not batches:
-        return _build_fallback_batches(paragraphs, image_map, batch_size=50)
-
-    return batches
+    """按段落分批：云端50段落一批次，本地30段落一批次。"""
+    batch_size = 30 if is_local_mode else 50
+    return _build_fallback_batches(paragraphs, image_map, extracted_images=extracted_images, batch_size=batch_size)
 
 
 def _format_chapter_results(chapter_results: list[dict]) -> str:
@@ -228,8 +201,16 @@ def _format_chapter_results(chapter_results: list[dict]) -> str:
         candidates = cr.get("candidates") or []
         if candidates:
             for c in candidates:
-                if isinstance(c, dict):
-                    lines.append(f"- 段落{c.get('para_index', '?')}: {c.get('reason', '')}")
+                if not isinstance(c, dict):
+                    continue
+                sev = c.get("severity")
+                sev_tag = f" [{sev}]" if sev else ""
+                reason = c.get("reason", "")
+                path = c.get("identification_path", "")
+                line = f"- 段落{c.get('para_index', '?')}{sev_tag}: {reason}"
+                if path:
+                    line += f" | 路径: {path}"
+                lines.append(line)
         else:
             lines.append("（无违规内容）")
         summary = cr.get("summary", "")
@@ -237,6 +218,97 @@ def _format_chapter_results(chapter_results: list[dict]) -> str:
             lines.append(f"摘要: {summary}")
         lines.append("")
     return "\n".join(lines)
+
+
+def _split_batch_by_image_limit(batch: ChapterBatch) -> list[ChapterBatch]:
+    """将图片超限的 ChapterBatch 拆分为多个子批次，每批次不超过 _MAX_IMAGES_PER_SUB_BATCH 张图片。
+
+    拆分规则：
+    - 在文本中找到所有 [图片: xxx] 标记所在的段落行
+    - 每6张图片一组，在包含超额图片的段落行前截断
+    - 无图片的前导段落在第一个子批次中完整保留
+    - 子批次的 para_indices 从行前缀 [N] 提取
+    - 每个子批次带对应的 image_map 子集
+    - 如果不超过6张图片，返回原 batch 不拆分
+    """
+    if len(batch.image_map) <= _MAX_IMAGES_PER_SUB_BATCH:
+        return [batch]
+
+    from src.reviewer.reviewer import _IMAGE_MARKER_RE as IMG_RE
+
+    lines = batch.text.split("\n")
+    # 找出每个包含图片标记的行索引及涉及的图片文件名
+    image_line_map: list[tuple[int, list[str]]] = []  # (line_idx, [filenames])
+    for line_idx, line in enumerate(lines):
+        filenames = [m.group(1).strip() for m in IMG_RE.finditer(line)]
+        if filenames:
+            image_line_map.append((line_idx, filenames))
+
+    # 为每个 image_line_map 条目记录其图片累积计数（从0开始）
+    # 用来判断截断位置
+    sub_batches: list[ChapterBatch] = []
+    current_start_line = 0
+    current_img_count = 0
+    # 已分配到当前子批次的 image_line_map 条目范围
+    current_entry_start = 0
+
+    def _extract_para_indices(text_lines: list[str]) -> list[int]:
+        indices = []
+        for l in text_lines:
+            m = re.match(r"\[(\d+)\]", l)
+            if m:
+                indices.append(int(m.group(1)))
+        return indices
+
+    def _collect_images(entry_start: int, entry_end: int) -> dict[str, str]:
+        imgs = {}
+        for _, fns in image_line_map[entry_start:entry_end]:
+            for fn in fns:
+                if fn in batch.image_map:
+                    imgs[fn] = batch.image_map[fn]
+        return imgs
+
+    for entry_idx, (line_idx, filenames) in enumerate(image_line_map):
+        n_new_images = len(filenames)
+        if current_img_count + n_new_images > _MAX_IMAGES_PER_SUB_BATCH and current_img_count > 0:
+            # 截断：当前子批次从 current_start_line 到 line_idx - 1
+            sub_lines = lines[current_start_line:line_idx]
+            sub_text = "\n".join(sub_lines) if sub_lines else ""
+            sub_images = _collect_images(current_entry_start, entry_idx)
+            sub_indices = _extract_para_indices(sub_lines)
+
+            sub_batches.append(ChapterBatch(
+                text=sub_text,
+                para_indices=sub_indices,
+                chapter_title=batch.chapter_title,
+                image_map=sub_images,
+            ))
+            # 新子批次从当前行开始
+            current_start_line = line_idx
+            current_img_count = n_new_images
+            current_entry_start = entry_idx
+        else:
+            current_img_count += n_new_images
+
+    # 最后一批：从 current_start_line 到末尾
+    if current_start_line < len(lines):
+        sub_lines = lines[current_start_line:]
+        sub_text = "\n".join(sub_lines)
+        sub_images = _collect_images(current_entry_start, len(image_line_map))
+        sub_indices = _extract_para_indices(sub_lines)
+        sub_batches.append(ChapterBatch(
+            text=sub_text,
+            para_indices=sub_indices,
+            chapter_title=batch.chapter_title,
+            image_map=sub_images,
+        ))
+
+    if len(sub_batches) <= 1:
+        return [batch]
+
+    logger.info("_split_batch_by_image_limit: 章节=%s, 图片=%d, 拆为%d个子批次",
+                batch.chapter_title, len(batch.image_map), len(sub_batches))
+    return sub_batches
 
 
 def review_format_rules(
@@ -260,7 +332,10 @@ def review_format_rules(
             .replace("{document_format_text}", doc_format_text)
         )
         messages = build_messages(system="你是暗标格式审查专家。", user=prompt)
-        llm_result = call_qwen(messages, api_settings)
+        # 审查阶段：本地300s，云端180s
+        review_settings = api_settings if is_local_mode else {
+            **api_settings, "api": {**api_settings.get("api", {}), "timeout": 180}}
+        llm_result = call_qwen(messages, review_settings)
 
         if not isinstance(llm_result, dict):
             return {
@@ -317,73 +392,110 @@ def review_content_rules(
     流程：
     1. _build_chapter_batches 产出 ChapterBatch 列表
     2. 对每条规则：对每个批次独立调 LLM（章节审核），然后一次综合判定调用
-    3. 综合判定结果复用 assemble_multi_batch_result 组装 tender_locations
+    3. 综合判定结果仅取 result/confidence/reason，tender_locations 直接从各批次 candidates 采纳
     """
-    from src.reviewer.reviewer import _build_multimodal_content, _IMAGE_MARKER_RE, assemble_multi_batch_result
+    from src.reviewer.reviewer import _build_multimodal_content, _IMAGE_MARKER_RE
 
     content_prompt_template = _CONTENT_PROMPT_PATH.read_text(encoding="utf-8")
     conclude_prompt_template = _CONTENT_CONCLUDE_PROMPT_PATH.read_text(encoding="utf-8")
 
-    # 页眉页脚上下文
-    hf_text_parts: list[str] = []
-    for section in doc_format.sections:
-        for h in section.headers:
-            if h.has_text:
-                hf_text_parts.append(f"[页眉 Section{section.section_index} {h.hf_type}] {h.text_content}")
-        for f in section.footers:
-            if f.has_text:
-                hf_text_parts.append(f"[页脚 Section{section.section_index} {f.hf_type}] {f.text_content}")
-    hf_context = "\n".join(hf_text_parts) if hf_text_parts else "（无页眉页脚内容）"
-
     batches = _build_chapter_batches(
-        paragraphs, tender_index, is_local_mode, api_settings, extracted_images, image_map,
+        paragraphs, is_local_mode, extracted_images, image_map,
     )
 
     all_results: list[dict] = []
-    total_work = len(rules) * (len(batches) + 1)  # +1 = 每条规则的综合判定
+    # 预计算所有规则的子批次总数，用于进度估算
+    total_work = 0
+    for rule in rules:
+        sub_count = 0
+        for batch in batches:
+            sub_count += len(_split_batch_by_image_limit(batch))
+        total_work += sub_count + 1  # +1 = 综合判定
     done_work = 0
+
+    def _review_one_sub_batch(sub: ChapterBatch, rule: AnbiaoRule, severity_level: str) -> dict:
+        """审核单个子批次。返回 {chapter_title, candidates, summary}。"""
+        prompt = (
+            content_prompt_template
+            .replace("{rule_text}", rule.rule_text)
+            .replace("{severity_level}", severity_level)
+            .replace("{chapter_title}", sub.chapter_title)
+            .replace("{tender_text}", sub.text)
+        )
+
+        has_images = sub.image_map and _IMAGE_MARKER_RE.search(prompt)
+        if has_images:
+            logger.info("暗标内容审查: 章节=%s, 图片数=%d", sub.chapter_title, len(sub.image_map))
+            content = _build_multimodal_content(prompt, sub.image_map)
+            messages = [
+                {"role": "system", "content": "你是暗标内容审查专家。"},
+                {"role": "user", "content": content},
+            ]
+        else:
+            logger.info("暗标内容审查: 章节=%s, 无图片发送", sub.chapter_title)
+            messages = build_messages(system="你是暗标内容审查专家。", user=prompt)
+
+        # 审查阶段：本地300s，云端180s
+        review_settings = api_settings if is_local_mode else {
+            **api_settings, "api": {**api_settings.get("api", {}), "timeout": 180}}
+        llm_result = None
+        for attempt in range(3):
+            try:
+                llm_result = call_qwen(messages, review_settings)
+                if isinstance(llm_result, dict):
+                    break
+                logger.warning("暗标内容审查: 章节=%s, 第%d次调用返回非dict, 重试", sub.chapter_title, attempt + 1)
+            except Exception as e:
+                logger.warning("暗标内容审查: 章节=%s, 第%d次调用异常: %s, 重试", sub.chapter_title, attempt + 1, e)
+                llm_result = None
+
+        if not isinstance(llm_result, dict):
+            return {"chapter_title": sub.chapter_title, "candidates": [], "summary": "LLM调用失败"}
+
+        return {
+            "chapter_title": sub.chapter_title,
+            "candidates": llm_result.get("candidates", []) or [],
+            "summary": llm_result.get("summary", ""),
+        }
 
     for rule in rules:
         severity_level = "mandatory" if rule.is_mandatory else "advisory"
+
+        # 构建所有子批次任务：[(batch_idx, sub_batch)]
+        all_sub_tasks: list[tuple[int, ChapterBatch]] = []
+        for batch_idx, batch in enumerate(batches):
+            for sub in _split_batch_by_image_limit(batch):
+                all_sub_tasks.append((batch_idx, sub))
+
+        # 并发执行所有子批次：本地2线程，云端6线程
+        max_workers = 2 if is_local_mode else 6
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_task = {}
+            for batch_idx, sub in all_sub_tasks:
+                fut = executor.submit(_review_one_sub_batch, sub, rule, severity_level)
+                future_to_task[fut] = (batch_idx, sub)
+            task_results = []
+            for future in as_completed(future_to_task):
+                batch_idx, _ = future_to_task[future]
+                task_results.append((batch_idx, future.result()))
+                done_work += 1
+                if progress_callback:
+                    progress_callback(done_work, total_work)
+
+        # 合并子批次结果到 chapter_results（按 batch_idx 分组）
         chapter_results: list[dict] = []
-
-        for batch in batches:
-            prompt = (
-                content_prompt_template
-                .replace("{rule_text}", rule.rule_text)
-                .replace("{severity_level}", severity_level)
-                .replace("{chapter_title}", batch.chapter_title)
-                .replace("{header_footer_context}", hf_context)
-                .replace("{tender_text}", batch.text)
-            )
-
-            has_images = batch.image_map and _IMAGE_MARKER_RE.search(prompt)
-            if has_images:
-                content = _build_multimodal_content(prompt, batch.image_map)
-                messages = [
-                    {"role": "system", "content": "你是暗标内容审查专家。"},
-                    {"role": "user", "content": content},
-                ]
-            else:
-                messages = build_messages(system="你是暗标内容审查专家。", user=prompt)
-
-            llm_result = call_qwen(messages, api_settings)
-            done_work += 1
-            if progress_callback:
-                progress_callback(done_work, total_work)
-
-            if not isinstance(llm_result, dict):
-                chapter_results.append({
-                    "chapter_title": batch.chapter_title,
-                    "candidates": [],
-                    "summary": f"章节 {batch.chapter_title} 审核 LLM 调用失败",
-                })
-                continue
-
+        for batch_idx, batch in enumerate(batches):
+            merged_candidates: list[dict] = []
+            merged_summary_parts: list[str] = []
+            for bi, sr in task_results:
+                if bi == batch_idx:
+                    merged_candidates.extend(sr.get("candidates", []) or [])
+                    if sr.get("summary"):
+                        merged_summary_parts.append(sr["summary"])
             chapter_results.append({
                 "chapter_title": batch.chapter_title,
-                "candidates": llm_result.get("candidates", []),
-                "summary": llm_result.get("summary", ""),
+                "candidates": merged_candidates,
+                "summary": "; ".join(merged_summary_parts) if merged_summary_parts else "",
             })
 
         chapter_results_text = _format_chapter_results(chapter_results)
@@ -393,8 +505,11 @@ def review_content_rules(
             .replace("{severity_level}", severity_level)
             .replace("{chapter_results_text}", chapter_results_text)
         )
+        # 综合判定：本地300s，云端180s
+        conclude_settings = api_settings if is_local_mode else {
+            **api_settings, "api": {**api_settings.get("api", {}), "timeout": 180}}
         messages = build_messages(system="你是暗标内容审查专家。", user=prompt)
-        llm_result = call_qwen(messages, api_settings)
+        llm_result = call_qwen(messages, conclude_settings)
         done_work += 1
         if progress_callback:
             progress_callback(done_work, total_work)
@@ -433,7 +548,21 @@ def review_content_rules(
         if not rule.is_mandatory and result_val == "fail":
             result_val = "warning"
 
-        final_result = {
+        # tender_locations：全部采纳各批次 candidates，不再由 conclude 筛选
+        if result_val == "pass":
+            tender_locations = []
+        else:
+            para_indices = [c["para_index"] for c in all_candidates]
+            per_para_reasons = {c["para_index"]: c.get("reason", "") for c in all_candidates}
+            tender_locations = [{
+                "batch_id": "all_candidates",
+                "path": "accumulated",
+                "global_para_indices": para_indices,
+                "text_snippet": all_candidates[0].get("text_snippet", "") if all_candidates else "",
+                "per_para_reasons": per_para_reasons,
+            }] if all_candidates else []
+
+        all_results.append({
             "source_module": "anbiao",
             "clause_index": rule.rule_index,
             "clause_text": rule.rule_text,
@@ -443,11 +572,8 @@ def review_content_rules(
             "reason": llm_result.get("reason", ""),
             "severity": "critical" if rule.is_mandatory else "minor",
             "is_mandatory": rule.is_mandatory,
-            "locations": llm_result.get("locations", []),
-            "retained_candidates": llm_result.get("retained_candidates", []),
-        }
-        assembled = assemble_multi_batch_result(final_result, all_candidates)
-        all_results.append(assembled)
+            "tender_locations": tender_locations,
+        })
 
     all_results.sort(key=lambda r: r["clause_index"])
     return all_results
