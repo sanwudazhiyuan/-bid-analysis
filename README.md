@@ -605,4 +605,4 @@ docker compose up -d --build
 
 ## 九、许可证
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE)
