@@ -672,3 +672,53 @@ def test_compute_rule_severity_legacy_candidates_without_severity_field():
     candidates = [{"para_index": 1, "reason": "old"}]
     assert _compute_rule_severity(candidates, is_mandatory=True) == "critical"
     assert _compute_rule_severity(candidates, is_mandatory=False) == "minor"
+
+
+# A–G 场景归档：以候选字典形式表达模型"应当"输出的样子，
+# 用 _compute_rule_severity 验证聚合链路表现符合 spec §4.6。
+
+def test_scenario_A_generic_mention_should_produce_no_candidate():
+    """泛指性描述，模型不应产出候选，聚合落 critical 但无 tender_locations。"""
+    from src.reviewer.anbiao_reviewer import _compute_rule_severity
+    assert _compute_rule_severity([], is_mandatory=True) == "critical"
+
+
+def test_scenario_C_desensitized_client_name_is_suspect_at_worst():
+    """脱敏客户名如被误判，也应是 suspect，聚合落 minor。"""
+    from src.reviewer.anbiao_reviewer import _compute_rule_severity
+    candidates = [{
+        "severity": "suspect",
+        "identification_path": "'某头部城商行'+资产规模数据可能唯一指向某家",
+    }]
+    assert _compute_rule_severity(candidates, is_mandatory=True) == "minor"
+
+
+def test_scenario_E_third_party_name_must_not_be_fail():
+    """第三方名称不得产生 fail 候选；即使误判为 suspect 也应落 minor。"""
+    from src.reviewer.anbiao_reviewer import _compute_rule_severity
+    candidates = [{"severity": "suspect", "identification_path": "招标方名称—但属第三方"}]
+    assert _compute_rule_severity(candidates, is_mandatory=True) == "minor"
+
+
+def test_scenario_F_desensitized_own_product_suspect_caps_minor():
+    """我司自研产品脱敏后若被标 suspect，不应升级 critical。"""
+    from src.reviewer.anbiao_reviewer import _compute_rule_severity
+    candidates = [{"severity": "suspect", "identification_path": "***脱敏名—需人工确认脱敏粒度"}]
+    assert _compute_rule_severity(candidates, is_mandatory=True) == "minor"
+
+
+def test_scenario_advisory_rule_never_critical():
+    """advisory 规则即使收到 fail 候选（模型违反提示词），也要封顶 minor。"""
+    from src.reviewer.anbiao_reviewer import _compute_rule_severity
+    candidates = [{"severity": "fail", "identification_path": "模型错误升级"}]
+    assert _compute_rule_severity(candidates, is_mandatory=False) == "minor"
+
+
+def test_scenario_real_fail_candidate_produces_critical():
+    """真正的 fail 候选（如公司全称）应聚合为 critical。"""
+    from src.reviewer.anbiao_reviewer import _compute_rule_severity
+    candidates = [{
+        "severity": "fail",
+        "identification_path": "公司全称'XX科技有限公司'可唯一识别投标人",
+    }]
+    assert _compute_rule_severity(candidates, is_mandatory=True) == "critical"
